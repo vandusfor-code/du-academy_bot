@@ -248,7 +248,11 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "contents": contents,
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 800},
+        "generationConfig": {
+            "temperature": 0.4,
+            "maxOutputTokens": 1024,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
 
     async with httpx.AsyncClient() as client:
