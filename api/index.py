@@ -1,4 +1,6 @@
 import os
+import re
+import unicodedata
 import httpx
 from fastapi import FastAPI, Request, Response
 
@@ -157,14 +159,40 @@ async def marcar_procesado(msg_id: str):
     await _sb_post("mensajes_procesados", {"msg_id": msg_id})
 
 
-async def obtener_manuales():
-    filas = await _sb_get("manuales_gemini", {"select": "id_gemini"})
+STOPWORDS = {
+    "el", "la", "los", "las", "de", "del", "un", "una", "unos", "unas", "en", "y", "o", "que",
+    "es", "son", "para", "por", "con", "se", "su", "sus", "al", "a", "como", "cual", "cuales",
+    "me", "mi", "tu", "le", "les", "lo", "esta", "este", "esto", "esos", "esas", "hay", "ya",
+}
+
+
+def _normalizar(texto: str) -> set:
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    palabras = re.findall(r"[a-z0-9]+", texto)
+    return {p for p in palabras if len(p) > 2 and p not in STOPWORDS}
+
+
+async def obtener_manuales(pregunta: str):
+    filas = await _sb_get("manuales_gemini", {"select": "id_gemini,nombre_archivo"})
+    palabras_pregunta = _normalizar(pregunta)
+
+    relevantes = []
+    for f in filas:
+        palabras_archivo = _normalizar(f["nombre_archivo"])
+        coincidencias = len(palabras_pregunta & palabras_archivo)
+        if coincidencias > 0:
+            relevantes.append((coincidencias, f))
+
+    relevantes.sort(key=lambda x: x[0], reverse=True)
+    seleccionados = [f for _, f in relevantes[:4]]
+
     return [
         {"file_data": {
             "mime_type": "application/pdf",
             "file_uri": f"https://generativelanguage.googleapis.com/v1beta/{f['id_gemini']}",
         }}
-        for f in filas
+        for f in seleccionados
     ]
 
 
@@ -174,7 +202,7 @@ async def obtener_manuales():
 
 async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: str) -> str:
     historial = await obtener_historial(numero)
-    archivos_parts = await obtener_manuales()
+    archivos_parts = await obtener_manuales(mensaje_usuario)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
@@ -214,7 +242,7 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
 
     async with httpx.AsyncClient() as client:
         try:
-            res = await client.post(url, json=payload, timeout=30.0)
+            res = await client.post(url, json=payload, timeout=45.0)
             if res.status_code != 200:
                 print(f"❌ Error Gemini: {res.text}")
                 return f"Oye {nombre_asesora}, tuve un problema procesando tu consulta. ¿Puedes intentar de nuevo? 🛠️✨"
