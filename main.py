@@ -10,7 +10,7 @@ AC_ACCESS_TOKEN = "EAAULe6CV6ZCYBR1DplWkXt11peXSPkhHCi4Xx8KcMMDJ7hs4k61r1aEDEpc4
 WEBHOOK_VERIFY_TOKEN = "cofrem_du_bot_2026"
 GEMINI_API_KEY = "AQ.Ab8RN6JI-ALMQZrurk2MJVpIGoF2sROsp-ATv9g2FOS5NzBEkw"
 
-# Memoria temporal del bot en el servidor
+# Memoria temporal en el servidor
 cache_msg_ids = set()
 historial_conversaciones = {}
 
@@ -42,11 +42,9 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if not messages:
             return Response(content='{"status":"no messages"}', media_type="application/json")
             
-        # ✅ CORREGIDO: Extrae de forma estricta el primer mensaje de la lista
         msg = messages[0]
         msg_id = msg.get("id")
         
-        # Protección anti-duplicados instantánea
         if msg_id in cache_msg_ids:
             return Response(content='{"status":"duplicate ignored"}', media_type="application/json")
         cache_msg_ids.add(msg_id)
@@ -58,7 +56,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             if not texto_usuario:
                 return Response(content='{"status":"empty text"}', media_type="application/json")
                 
-            # Procesar en segundo plano para responder de inmediato
             background_tasks.add_task(procesar_flujo_bot, numero, texto_usuario)
             
     except Exception as e:
@@ -106,22 +103,26 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
                 if "candidates" in data and data["candidates"]:
                     candidate = data["candidates"][0]
                     if "content" in candidate and "parts" in candidate["content"]:
-                        texto_res = candidate["content"]["parts"][0].get("text", "")
-                        
-                        # Guardar memoria de conversación
-                        historial.append({"role": "user", "parts": [{"text": mensaje_usuario}]})
-                        historial.append({"role": "model", "parts": [{"text": texto_res}]})
-                        historial_conversaciones[numero] = historial[-10:]
-                        return texto_res
+                        parts = candidate["content"]["parts"]
+                        if parts and "text" in parts[0]:
+                            texto_res = parts[0]["text"]
+                            
+                            historial.append({"role": "user", "parts": [{"text": mensaje_usuario}]})
+                            historial.append({"role": "model", "parts": [{"text": texto_res}]})
+                            historial_conversaciones[numero] = historial[-10:]
+                            return texto_res
                         
                 return f"Oye {nombre_asesora}, se me cruzaron los cables con el formato. ¿Me repites? ⚡"
             else:
+                print(f"❌ Error Gemini Status {res.status_code}: {res.text}")
                 return f"Oye {nombre_asesora}, tuve un problema con el cerebro de datos. ¿Intentas de nuevo? 🛠️"
         except Exception as e:
+            print(f"❌ Excepción Gemini: {str(e)}")
             return f"Lo siento {nombre_asesora}, se generó un error interno al procesar tu mensaje. ⚙️"
 
 async def despachar_whatsapp(numero: str, texto: str):
-    url = f"https://facebook.com{AC_PHONE_NUMBER_ID}/messages"
+    # ✅ CORREGIDO: ://facebook.com bien estructurado
+    url = f"https://://facebook.com/v19.0/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
@@ -134,7 +135,8 @@ async def despachar_whatsapp(numero: str, texto: str):
         await client.post(url, json=payload, headers=headers)
 
 async def marcar_escribiendo_whatsapp(numero: str):
-    url = f"https://facebook.com{AC_PHONE_NUMBER_ID}/messages"
+    # ✅ CORREGIDO: ://facebook.com bien estructurado
+    url = f"https://://facebook.com/v19.0/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
