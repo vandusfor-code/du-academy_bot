@@ -4,16 +4,14 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 
 app = FastAPI()
 
-# ─── CONFIGURACIÓN DE CREDENCIALES (Pruebas) ───
+# ─── CONFIGURACIÓN DE CREDENCIALES ───
 AC_PHONE_NUMBER_ID = "1101627349711038"
 AC_ACCESS_TOKEN = "EAAULe6CV6ZCYBR1DplWkXt11peXSPkhHCi4Xx8KcMMDJ7hs4k61r1aEDEpc46XL35u5ZCRfk6k8YxXDKmnYmZCnGjyvHiLXVLpoNCX6vZCWlZBkk6hERoltww5qQFBvzSFdp0A8fZCAe2DK0ygIIZCJAvZBGurJ1gNar6ZBlwbY5FHwGy02z4SwPRH5LcHgDT4gZDZD"
 WEBHOOK_VERIFY_TOKEN = "cofrem_du_bot_2026"
 GEMINI_API_KEY = "AQ.Ab8RN6JI-ALMQZrurk2MJVpIGoF2sROsp-ATv9g2FOS5NzBEkw"
-DU_HOJA_IDS = "Du_IDs_Archivos"
 
 # Memoria temporal del bot en el servidor
 cache_msg_ids = set()
-cache_registro = {}
 historial_conversaciones = {}
 
 @app.get("/webhook")
@@ -31,16 +29,20 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if not body or "entry" not in body or not body["entry"]:
             return Response(content='{"status":"no entry"}', media_type="application/json")
             
-        changes = body["entry"][0].get("changes", [{}])
-        entrada = changes[0].get("value", {})
-        
-        if "statuses" in entrada and "messages" not in entrada:
-            return Response(content='{"status":"status update ignored"}', media_type="application/json")
+        entry = body["entry"][0]
+        if "changes" not in entry or not entry["changes"]:
+            return Response(content='{"status":"no changes"}', media_type="application/json")
             
-        messages = entrada.get("messages", [])
+        value = entry["changes"][0].get("value", {})
+        
+        if "statuses" in value and "messages" not in value:
+            return Response(content='{"status":"status update"}', media_type="application/json")
+            
+        messages = value.get("messages", [])
         if not messages:
             return Response(content='{"status":"no messages"}', media_type="application/json")
             
+        # ✅ CORREGIDO: Extrae de forma estricta el primer mensaje de la lista
         msg = messages[0]
         msg_id = msg.get("id")
         
@@ -56,16 +58,16 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             if not texto_usuario:
                 return Response(content='{"status":"empty text"}', media_type="application/json")
                 
-            # Ejecutamos en segundo plano para responderle a Meta inmediatamente
+            # Procesar en segundo plano para responder de inmediato
             background_tasks.add_task(procesar_flujo_bot, numero, texto_usuario)
             
     except Exception as e:
-        print(f"❌ Error doPost: {str(e)}")
+        print(f"❌ Error doPost FastAPI: {str(e)}")
         
     return Response(content='{"status":"success"}', media_type="application/json")
 
 async def procesar_flujo_bot(numero: str, texto: str):
-    nombre_asesora = "Asesora"
+    nombre_asesora = "Duvan"
     await marcar_escribiendo_whatsapp(numero)
     respuesta = await consultar_du_bot(texto, nombre_asesora, numero)
     await despachar_whatsapp(numero, respuesta)
@@ -97,18 +99,26 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
     }
     
     async with httpx.AsyncClient() as client:
-        res = await client.post(url, json=payload, timeout=30.0)
-        if res.status_code == 200:
-            data = res.json()
-            try:
-                texto_res = data["candidates"][0]["content"]["parts"][0]["text"]
-                historial.append({"role": "user", "parts": [{"text": mensaje_usuario}]})
-                historial.append({"role": "model", "parts": [{"text": texto_res}]})
-                historial_conversaciones[numero] = historial[-10:]
-                return texto_res
-            except:
-                return f"Oye {nombre_asesora}, se me cruzaron los cables un segundo. ¿Me repites la pregunta? ⚡"
-        return f"Oye {nombre_asesora}, tuve un problema de conexión con el cerebro de datos. ¿Puedes intentar de nuevo? 🛠️"
+        try:
+            res = await client.post(url, json=payload, timeout=30.0)
+            if res.status_code == 200:
+                data = res.json()
+                if "candidates" in data and data["candidates"]:
+                    candidate = data["candidates"][0]
+                    if "content" in candidate and "parts" in candidate["content"]:
+                        texto_res = candidate["content"]["parts"][0].get("text", "")
+                        
+                        # Guardar memoria de conversación
+                        historial.append({"role": "user", "parts": [{"text": mensaje_usuario}]})
+                        historial.append({"role": "model", "parts": [{"text": texto_res}]})
+                        historial_conversaciones[numero] = historial[-10:]
+                        return texto_res
+                        
+                return f"Oye {nombre_asesora}, se me cruzaron los cables con el formato. ¿Me repites? ⚡"
+            else:
+                return f"Oye {nombre_asesora}, tuve un problema con el cerebro de datos. ¿Intentas de nuevo? 🛠️"
+        except Exception as e:
+            return f"Lo siento {nombre_asesora}, se generó un error interno al procesar tu mensaje. ⚙️"
 
 async def despachar_whatsapp(numero: str, texto: str):
     url = f"https://facebook.com{AC_PHONE_NUMBER_ID}/messages"
