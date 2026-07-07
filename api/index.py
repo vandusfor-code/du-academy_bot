@@ -1,6 +1,6 @@
 import os
 import httpx
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Response
 
 app = FastAPI()
 
@@ -24,7 +24,7 @@ def verificar_webhook(request: Request):
 
 @app.post("/api")
 @app.post("/webhook")
-async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
+async def recibir_mensaje(request: Request):
     try:
         body = await request.json()
         
@@ -56,7 +56,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             if not texto_usuario:
                 return Response(content='{"status":"empty text"}', media_type="application/json")
                 
-            background_tasks.add_task(procesar_flujo_bot, numero, texto_usuario)
+            await procesar_flujo_bot(numero, texto_usuario)
             
     except Exception as e:
         print(f"❌ Error doPost FastAPI: {str(e)}")
@@ -64,13 +64,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     return Response(content='{"status":"success"}', media_type="application/json")
 
 async def procesar_flujo_bot(numero: str, texto: str):
-    print(f"[DEBUG] procesar_flujo_bot iniciado para {numero}")
     nombre_contacto = "Duvan"  # Nombre harcodeado temporal para pruebas de respuesta directa
     await marcar_escribiendo_whatsapp(numero)
     respuesta = await consultar_du_live(texto, nombre_contacto)
-    print(f"[DEBUG] respuesta de Gemini: {respuesta[:80]}")
     await despachar_mensaje_whatsapp(numero, respuesta)
-    print(f"[DEBUG] procesar_flujo_bot terminado para {numero}")
 
 # ============================================================
 # MÓDULO DU LIVE: ASISTENTE GENERAL GRATUITO CON BÚSQUEDA WEB
