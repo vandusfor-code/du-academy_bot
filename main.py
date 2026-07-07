@@ -70,11 +70,12 @@ async def procesar_flujo_bot(numero: str, texto: str):
     await despachar_whatsapp(numero, respuesta)
 
 async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: str) -> str:
-    url = f"https://googleapis.com{GEMINI_API_KEY}"
+    # ✅ CORREGIDO: Concatenación clásica de URL inmune a errores de f-string con llaves {}
+    url = "https://googleapis.com" + GEMINI_API_KEY
     
     system_instruction = (
         "Tu nombre es Du. Eres el compañero de trabajo virtual de las asesoras de COFREM en People BPO, ayudándolas en tiempo real.\n\n"
-        f"Te habla: *{nombre_asesora}*. Trátala con calidez y compañerismo.\n\n"
+        "Te habla: *" + nombre_asesora + "*. Trátala con calidez y compañerismo.\n\n"
         "ORDEN DE PRIORIDAD:\n"
         "1. Revisa los documentos PDF adjuntos (manuales).\n"
         "2. Si no está, usa búsqueda web confiando SOLO en cofrem.com.co.\n"
@@ -103,27 +104,26 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
                 if "candidates" in data and data["candidates"]:
                     candidate = data["candidates"][0]
                     if "content" in candidate and "parts" in candidate["content"]:
-                        parts = candidate["content"]["parts"]
-                        if parts and "text" in parts[0]:
-                            texto_res = parts[0]["text"]
+                        parts = candidate["content"]["parts"][0]
+                        if parts and "text" in parts:
+                            texto_res = parts["text"]
                             
                             historial.append({"role": "user", "parts": [{"text": mensaje_usuario}]})
                             historial.append({"role": "model", "parts": [{"text": texto_res}]})
                             historial_conversaciones[numero] = historial[-10:]
                             return texto_res
                         
-                return f"Oye {nombre_asesora}, se me cruzaron los cables con el formato. ¿Me repites? ⚡"
+                return "Oye " + nombre_asesora + ", se me cruzaron los cables con el formato. ¿Me repites? ⚡"
             else:
                 print(f"❌ Error Gemini Status {res.status_code}: {res.text}")
-                return f"Oye {nombre_asesora}, tuve un problema con el cerebro de datos. ¿Intentas de nuevo? 🛠️"
+                return "Oye " + nombre_asesora + ", tuve un problema con el cerebro de datos. ¿Intentas de nuevo? 🛠️"
         except Exception as e:
             print(f"❌ Excepción Gemini: {str(e)}")
-            return f"Lo siento {nombre_asesora}, se generó un error interno al procesar tu mensaje. ⚙️"
+            return "Lo siento " + nombre_asesora + ", se generó un error interno al procesar tu mensaje. ⚙️"
 
 async def despachar_whatsapp(numero: str, texto: str):
-    # ✅ CORREGIDO: ://facebook.com bien estructurado
-    url = f"https://://facebook.com/v19.0/{AC_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    url = "https://facebook.com" + AC_PHONE_NUMBER_ID + "/messages"
+    headers = {"Authorization": "Bearer " + AC_ACCESS_TOKEN}
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -135,9 +135,8 @@ async def despachar_whatsapp(numero: str, texto: str):
         await client.post(url, json=payload, headers=headers)
 
 async def marcar_escribiendo_whatsapp(numero: str):
-    # ✅ CORREGIDO: ://facebook.com bien estructurado
-    url = f"https://://facebook.com/v19.0/{AC_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    url = "https://facebook.com" + AC_PHONE_NUMBER_ID + "/messages"
+    headers = {"Authorization": "Bearer " + AC_ACCESS_TOKEN}
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
