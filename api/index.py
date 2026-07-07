@@ -64,10 +64,13 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     return Response(content='{"status":"success"}', media_type="application/json")
 
 async def procesar_flujo_bot(numero: str, texto: str):
+    print(f"[DEBUG] procesar_flujo_bot iniciado para {numero}")
     nombre_contacto = "Duvan"  # Nombre harcodeado temporal para pruebas de respuesta directa
     await marcar_escribiendo_whatsapp(numero)
     respuesta = await consultar_du_live(texto, nombre_contacto)
+    print(f"[DEBUG] respuesta de Gemini: {respuesta[:80]}")
     await despachar_mensaje_whatsapp(numero, respuesta)
+    print(f"[DEBUG] procesar_flujo_bot terminado para {numero}")
 
 # ============================================================
 # MÓDULO DU LIVE: ASISTENTE GENERAL GRATUITO CON BÚSQUEDA WEB
