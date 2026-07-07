@@ -15,6 +15,7 @@ WEBHOOK_VERIFY_TOKEN = "mi_auditoria_segura_2026"
 cache_msg_ids = set()
 
 @app.get("/api")
+@app.get("/webhook")
 def verificar_webhook(request: Request):
     params = request.query_params
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WEBHOOK_VERIFY_TOKEN:
@@ -22,6 +23,7 @@ def verificar_webhook(request: Request):
     return Response(content="Forbidden", status_code=403)
 
 @app.post("/api")
+@app.post("/webhook")
 async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.json()
@@ -71,8 +73,8 @@ async def procesar_flujo_bot(numero: str, texto: str):
 # MÓDULO DU LIVE: ASISTENTE GENERAL GRATUITO CON BÚSQUEDA WEB
 # ============================================================
 async def consultar_du_live(mensaje_usuario: str, nombre_contacto: str) -> str:
-    url = "https://googleapis.com" + AC_ACCESS_TOKEN_GEMINI
-    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={AC_ACCESS_TOKEN_GEMINI}"
+
     system_instruction = (
         "Tu nombre es Du. Eres un asistente virtual inteligente y el segundo cerebro del usuario en WhatsApp.\n"
         f"Te está hablando directamente: *{nombre_contacto}*. Trátale con máxima cercanía, amabilidad y empatía, como un colega de confianza.\n\n"
@@ -86,7 +88,7 @@ async def consultar_du_live(mensaje_usuario: str, nombre_contacto: str) -> str:
     payload = {
         "contents": [{"parts": [{"text": mensaje_usuario}]}],
         "systemInstruction": {"parts": [{"text": system_instruction}]},
-        "tools": [{"googleSearch": {}}],
+        "tools": [{"google_search": {}}],
         "generationConfig": {
             "temperature": 0.5,
             "maxOutputTokens": 1024
@@ -112,7 +114,7 @@ async def consultar_du_live(mensaje_usuario: str, nombre_contacto: str) -> str:
             return f"Lo siento {nombre_contacto}, se generó un error interno al procesar tu mensaje. ⚙️"
 
 async def despachar_mensaje_whatsapp(numero: str, texto: str):
-    url = f"https://facebook.com{AC_PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v20.0/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
@@ -124,7 +126,7 @@ async def despachar_mensaje_whatsapp(numero: str, texto: str):
         await client.post(url, json=payload, headers=headers)
 
 async def marcar_escribiendo_whatsapp(numero: str):
-    url = f"https://facebook.com{AC_PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v20.0/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
