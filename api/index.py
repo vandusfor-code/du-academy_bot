@@ -120,10 +120,14 @@ async def procesar_flujo_bot(numero: str, texto: str):
         return
     if await guardar_compromiso_auditoria(numero, texto):
         return
+    if await procesar_respuesta_metricas(numero, texto):
+        return
 
     nombre_asesora = await buscar_asesora(numero)
     if not nombre_asesora:
         respuesta = await gestionar_nuevo_usuario(numero, texto)
+    elif _es_pregunta_metricas(texto):
+        respuesta = await iniciar_solicitud_metricas(numero)
     else:
         await marcar_escribiendo_whatsapp(numero)
         respuesta = await consultar_du_bot(texto, nombre_asesora, numero)
@@ -981,3 +985,62 @@ async def procesar_compromiso_consolidado(numero: str, texto: str) -> bool:
 def _formatear_fecha_co(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str)
     return dt.strftime("%d/%m/%Y")
+
+
+# ============================================================
+# MÉTRICAS EN TIEMPO REAL — consulta con verificación de contraseña
+# ============================================================
+
+PALABRAS_METRICAS = {
+    "metrica", "metricas", "bono", "adherencia", "productividad", "satisfaccion",
+    "desempeno", "calificacion", "calificaciones", "resultados", "pec", "penc",
+}
+
+
+def _es_pregunta_metricas(texto: str) -> bool:
+    return bool(_normalizar(texto) & PALABRAS_METRICAS)
+
+
+async def iniciar_solicitud_metricas(numero: str) -> str:
+    await _sb_upsert("metricas_pendientes", {"numero": numero})
+    return (
+        "Claro, para continuar por favor envíame la *contraseña* que te asignaron. 🔐"
+    )
+
+
+async def procesar_respuesta_metricas(numero: str, texto: str) -> bool:
+    pendientes = await _sb_get("metricas_pendientes", {"numero": f"eq.{numero}", "select": "numero"})
+    if not pendientes:
+        return False
+
+    filas = await _sb_get("asesoras", {"numero": f"eq.{numero}", "select": "nombre,usuario,contrasena"})
+    if not filas:
+        return False
+    asesora = filas[0]
+
+    if not asesora.get("contrasena") or texto.strip() != asesora["contrasena"]:
+        await despachar_mensaje_whatsapp(numero, "Esa contraseña no es correcta 🙈 Intenta de nuevo.")
+        return True
+
+    await _sb_delete("metricas_pendientes", {"numero": f"eq.{numero}"})
+
+    metricas = await _sb_get("metricas_asesoras", {
+        "usuario": f"eq.{asesora['usuario']}", "select": "metrica,valor,fecha",
+    })
+
+    if not metricas:
+        await despachar_mensaje_whatsapp(
+            numero,
+            f"Hola {asesora['nombre']}, no encontré métricas registradas todavía a tu nombre. Consulta con tu supervisor. 📋",
+        )
+        return True
+
+    fecha = metricas[0].get("fecha") or ""
+    lineas = "\n".join(f"- {m['metrica']}: {m['valor']}" for m in metricas)
+    mensaje = (
+        f"📊 *Tus métricas, {asesora['nombre']}*"
+        + (f" ({fecha})" if fecha else "")
+        + f"\n\n{lineas}\n\n¡Sigue así! 💪"
+    )
+    await despachar_mensaje_whatsapp(numero, mensaje)
+    return True
