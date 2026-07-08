@@ -22,6 +22,10 @@ PD_TEMPLATE_LANG = os.environ.get("PD_TEMPLATE_LANG", "es_CO")
 PD_IMAGEN_URL = os.environ.get("PD_IMAGEN_URL", "")
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 AUDITORIA_SECRET = os.environ.get("AUDITORIA_SECRET", "")
+AC_TEMPLATE_NAME = os.environ.get("AC_TEMPLATE_NAME", "primer_contacto")
+AC_TEMPLATE_LANG = os.environ.get("AC_TEMPLATE_LANG", "es_CO")
+PDF_SERVICE_URL = os.environ.get("PDF_SERVICE_URL", "")
+PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -73,9 +77,12 @@ async def recibir_mensaje(request: Request):
 
         elif msg.get("type") == "button":
             numero = str(msg.get("from")).strip()
-            payload_boton = (msg.get("button", {}).get("payload") or "")
+            boton = msg.get("button", {})
+            payload_boton = boton.get("payload") or ""
             if payload_boton.startswith("PILDORA_VER_"):
                 await enviar_pildora_al_asesor(numero)
+            elif (boton.get("text") or "") == "Continuar":
+                await procesar_aceptacion_por_numero(numero)
 
         elif msg.get("type") == "interactive":
             numero = str(msg.get("from")).strip()
@@ -86,6 +93,10 @@ async def recibir_mensaje(request: Request):
                     await registrar_aplicare(numero)
                 elif button_id == "btn_recibida":
                     await marcar_recibida_auditoria(numero)
+                elif button_id.startswith("ACEPTAR_"):
+                    await procesar_aceptacion_consolidada(numero, button_id.replace("ACEPTAR_", "", 1))
+                else:
+                    await procesar_aceptacion_por_numero(numero)
 
     except Exception as e:
         print(f"❌ Error controlado en recibir_mensaje: {e}")
@@ -105,6 +116,8 @@ def _ok():
 
 
 async def procesar_flujo_bot(numero: str, texto: str):
+    if await procesar_compromiso_consolidado(numero, texto):
+        return
     if await guardar_compromiso_auditoria(numero, texto):
         return
 
@@ -770,3 +783,201 @@ async def api_enviar_auditoria(request: Request):
 
     ok = await enviar_auditoria(numero, nombre, nota, hallazgos, puntos_mejora)
     return Response(content=json.dumps({"ok": ok}), media_type="application/json")
+
+
+# ============================================================
+# AUDITORÍAS CONSOLIDADAS — flujo automático desde Cortes_Envio
+# (plantilla "primer_contacto", 2 PDFs generados vía Apps Script)
+# ============================================================
+
+async def enviar_mensaje_boton_url(numero: str, texto_cuerpo: str, texto_boton: str, url: str):
+    endpoint = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "interactive",
+        "interactive": {
+            "type": "cta_url",
+            "body": {"text": texto_cuerpo},
+            "action": {"name": "cta_url", "parameters": {"display_text": texto_boton, "url": url}},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.post(endpoint, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando botón URL: [{res.status_code}] {res.text}")
+
+
+async def solicitar_pdf(datos: dict, tipo: str):
+    if not PDF_SERVICE_URL:
+        print("❌ PDF_SERVICE_URL no configurado")
+        return None
+    payload = {"secret": PDF_SERVICE_SECRET, "datos": datos, "tipo": tipo}
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.post(PDF_SERVICE_URL, json=payload, timeout=45.0)
+            if res.status_code != 200:
+                print(f"❌ Error generando PDF ({tipo}): [{res.status_code}] {res.text}")
+                return None
+            data = res.json()
+            return data.get("url")
+        except Exception as e:
+            print(f"❌ Error llamando al servicio de PDF: {e}")
+            return None
+
+
+@app.post("/api/auditoria-consolidada/enviar")
+async def api_enviar_auditoria_consolidada(request: Request):
+    if not AUDITORIA_SECRET or request.headers.get("authorization") != f"Bearer {AUDITORIA_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+
+    body = await request.json()
+    id_corte = str(body.get("idCorte", "")).strip()
+    numero = str(body.get("numero", "")).strip()
+    nombre = str(body.get("nombre", "")).strip()
+
+    if not id_corte or not numero or not nombre:
+        return Response(content=json.dumps({"error": "idCorte, numero y nombre requeridos"}), status_code=400, media_type="application/json")
+
+    endpoint = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "template",
+        "template": {
+            "name": AC_TEMPLATE_NAME,
+            "language": {"code": AC_TEMPLATE_LANG},
+            "components": [
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": "0",
+                    "parameters": [{"type": "payload", "payload": f"ACEPTAR_{id_corte}"}],
+                }
+            ],
+        },
+    }
+
+    async with httpx.AsyncClient() as client:
+        res = await client.post(endpoint, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando plantilla {AC_TEMPLATE_NAME} a {numero}: [{res.status_code}] {res.text}")
+            return Response(content=json.dumps({"ok": False, "error": res.text}), status_code=502, media_type="application/json")
+
+    await _sb_post("auditorias_consolidadas", {
+        "id_corte": id_corte,
+        "numero": numero,
+        "nombre_asesora": nombre,
+        "usuario": body.get("usuario"),
+        "fecha_auditoria": body.get("fecha"),
+        "cantidad_auditorias": body.get("cantidadAuditorias"),
+        "nota": body.get("nota"),
+        "hallazgos": body.get("hallazgos"),
+        "puntos_mejora": body.get("puntosMejora"),
+        "link_pdf_inicial": body.get("pdfInicialUrl"),
+        "estado": "PENDIENTE_ACEPTACION",
+    })
+
+    return Response(content=json.dumps({"ok": True}), media_type="application/json")
+
+
+async def procesar_aceptacion_por_numero(numero: str):
+    filas = await _sb_get("auditorias_consolidadas", {
+        "numero": f"eq.{numero}", "estado": "eq.PENDIENTE_ACEPTACION",
+        "select": "id_corte", "order": "fecha_envio.desc", "limit": "1",
+    })
+    if filas:
+        await procesar_aceptacion_consolidada(numero, filas[0]["id_corte"])
+
+
+async def procesar_aceptacion_consolidada(numero: str, id_corte: str):
+    filas = await _sb_get("auditorias_consolidadas", {
+        "id_corte": f"eq.{id_corte}", "select": "nombre_asesora,link_pdf_inicial",
+    })
+    if not filas:
+        return
+    datos = filas[0]
+    asesor = datos["nombre_asesora"]
+
+    await _sb_patch("auditorias_consolidadas", {"id_corte": f"eq.{id_corte}"}, {
+        "estado": "AUDITORIA_LEIDA",
+        "fecha_lectura": _ahora_iso(),
+    })
+
+    mensaje_auditoria = (
+        f"¡Hola {asesor}! 👋\n\n"
+        "📋 Tu *informe consolidado de auditoría* ya está listo.\n\n"
+        "Presiona el botón para revisarlo. 👇"
+    )
+    await enviar_mensaje_boton_url(numero, mensaje_auditoria, "Ver Auditoría", datos["link_pdf_inicial"])
+
+    mensaje_compromiso = (
+        "📝 *Compromiso de mejora*\n\n"
+        "Por favor, responde este mensaje indicando el compromiso que asumirás para aplicar los puntos de mejora identificados.\n\n"
+        "_Tu respuesta quedará registrada como evidencia._ ✍️"
+    )
+    await despachar_mensaje_whatsapp(numero, mensaje_compromiso)
+
+
+async def procesar_compromiso_consolidado(numero: str, texto: str) -> bool:
+    filas = await _sb_get("auditorias_consolidadas", {
+        "numero": f"eq.{numero}", "estado": "eq.AUDITORIA_LEIDA",
+        "select": "*", "order": "fecha_envio.desc", "limit": "1",
+    })
+    if not filas:
+        return False
+
+    datos = filas[0]
+    id_corte = datos["id_corte"]
+    asesor = datos["nombre_asesora"]
+    fecha_compromiso_iso = _ahora_iso()
+
+    await _sb_patch("auditorias_consolidadas", {"id_corte": f"eq.{id_corte}"}, {
+        "compromiso": texto,
+        "fecha_compromiso": fecha_compromiso_iso,
+        "estado": "COMPROMISO_RECIBIDO",
+    })
+
+    await despachar_mensaje_whatsapp(numero, (
+        f"¡Listo {asesor}! ✅\n\n"
+        "Tu *compromiso de mejora* quedó registrado.\n\n"
+        "Confío en que aplicarás los puntos de mejora. 💪"
+    ))
+    await despachar_mensaje_whatsapp(numero, "📄 En unos segundos recibirás tu *compromiso firmado*...")
+
+    pdf_final_url = await solicitar_pdf({
+        "ASESOR": asesor,
+        "FECHA_AUDITORIA": datos.get("fecha_auditoria"),
+        "ID_CORTE": id_corte,
+        "CANTIDAD_AUDITORIAS": datos.get("cantidad_auditorias"),
+        "PROMEDIO_NOTA": datos.get("nota"),
+        "HALLAZGOS": datos.get("hallazgos"),
+        "PUNTOS_MEJORA": datos.get("puntos_mejora"),
+        "COMPROMISO": texto,
+        "FECHA_COMPROMISO": _formatear_fecha_co(fecha_compromiso_iso),
+    }, "FINAL")
+
+    if not pdf_final_url:
+        print(f"❌ No se pudo generar el PDF final para {id_corte}")
+        return True
+
+    await _sb_patch("auditorias_consolidadas", {"id_corte": f"eq.{id_corte}"}, {
+        "link_pdf_final": pdf_final_url,
+        "estado": "CERRADA",
+        "fecha_cierre": _ahora_iso(),
+    })
+
+    await enviar_mensaje_boton_url(
+        numero,
+        "📑 ¡Aquí está tu *compromiso firmado*!\n\nQue tengas un excelente turno. 🚀✨",
+        "Ver Compromiso",
+        pdf_final_url,
+    )
+    return True
+
+
+def _formatear_fecha_co(iso_str: str) -> str:
+    dt = datetime.fromisoformat(iso_str)
+    return dt.strftime("%d/%m/%Y")
