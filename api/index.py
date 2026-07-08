@@ -1,6 +1,9 @@
 import os
 import re
+import time
+import random
 import unicodedata
+from datetime import date
 import httpx
 from fastapi import FastAPI, Request, Response
 
@@ -12,6 +15,11 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_VERIFY_TOKEN = os.environ["WEBHOOK_VERIFY_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+
+PD_TEMPLATE_NAME = os.environ.get("PD_TEMPLATE_NAME", "pildora_diaria")
+PD_TEMPLATE_LANG = os.environ.get("PD_TEMPLATE_LANG", "es_CO")
+PD_IMAGEN_URL = os.environ.get("PD_IMAGEN_URL", "")
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -61,6 +69,20 @@ async def recibir_mensaje(request: Request):
             if texto_usuario:
                 await procesar_flujo_bot(numero, texto_usuario)
 
+        elif msg.get("type") == "button":
+            numero = str(msg.get("from")).strip()
+            payload_boton = (msg.get("button", {}).get("payload") or "")
+            if payload_boton.startswith("PILDORA_VER_"):
+                await enviar_pildora_al_asesor(numero)
+
+        elif msg.get("type") == "interactive":
+            numero = str(msg.get("from")).strip()
+            interactive = msg.get("interactive", {})
+            if interactive.get("type") == "button_reply":
+                button_id = interactive.get("button_reply", {}).get("id", "")
+                if button_id == "pildora_aplicare":
+                    await registrar_aplicare(numero)
+
     except Exception as e:
         print(f"❌ Error controlado en recibir_mensaje: {e}")
 
@@ -108,6 +130,18 @@ async def _sb_post(tabla: str, payload):
 async def _sb_delete(tabla: str, params: dict):
     async with httpx.AsyncClient() as client:
         await client.delete(f"{SUPABASE_URL}/rest/v1/{tabla}", headers=SUPABASE_HEADERS, params=params, timeout=10.0)
+
+
+async def _sb_patch(tabla: str, params: dict, payload: dict):
+    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
+    async with httpx.AsyncClient() as client:
+        await client.patch(f"{SUPABASE_URL}/rest/v1/{tabla}", headers=headers, params=params, json=payload, timeout=10.0)
+
+
+async def _sb_upsert(tabla: str, payload):
+    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    async with httpx.AsyncClient() as client:
+        await client.post(f"{SUPABASE_URL}/rest/v1/{tabla}", headers=headers, json=payload, timeout=10.0)
 
 
 async def buscar_asesora(numero: str):
@@ -342,3 +376,269 @@ async def marcar_escribiendo_whatsapp(numero: str):
     }
     async with httpx.AsyncClient() as client:
         await client.post(url, json=payload, headers=headers, timeout=10.0)
+
+
+# ============================================================
+# PÍLDORAS DIARIAS
+# ============================================================
+
+CATEGORIAS_OPERATIVAS = [
+    "Empatía", "Comunicación efectiva", "Saludo y cierre", "Manejo de objeciones",
+    "Mindset positivo", "Procedimientos COFREM", "Motivación", "Buenas prácticas",
+]
+CATEGORIAS_MOTIVADORAS = [
+    "Motivación", "Inspiración", "Buen día", "Productividad", "Bienestar", "Crecimiento",
+]
+CATEGORIAS_LIDERAZGO = [
+    "Motivación personal", "Bienestar", "Mindset", "Crecimiento personal",
+    "Inspiración", "Reflexión", "Paz mental", "Perspectiva",
+]
+AREAS_SIN_ATENCION = {"radicacion", "encuestas", "administrativo", "administrativa", "administrativos"}
+PALABRAS_LIDERAZGO = {
+    "coordinador", "coordinadora", "lider", "jefe", "jefa",
+    "supervisor", "supervisora", "gerente", "auditor", "auditora",
+}
+FESTIVOS_2026 = {
+    "2026-06-29", "2026-07-20", "2026-08-07", "2026-08-17", "2026-10-12",
+    "2026-11-02", "2026-11-16", "2026-12-08", "2026-12-25",
+}
+DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
+def identificar_tipo_area(area: str) -> str:
+    area_norm = "".join(c for c in unicodedata.normalize("NFKD", area.lower()) if not unicodedata.combining(c))
+    if any(p in area_norm for p in PALABRAS_LIDERAZGO):
+        return "liderazgo"
+    if any(a in area_norm for a in AREAS_SIN_ATENCION):
+        return "motivadora"
+    return "operativa"
+
+
+def seleccionar_categoria(tipo_area: str) -> str:
+    categorias = {
+        "liderazgo": CATEGORIAS_LIDERAZGO,
+        "motivadora": CATEGORIAS_MOTIVADORAS,
+    }.get(tipo_area, CATEGORIAS_OPERATIVAS)
+    return random.choice(categorias)
+
+
+def es_festivo(fecha: date) -> bool:
+    return fecha.isoformat() in FESTIVOS_2026
+
+
+async def generar_pildora_gemini(area: str, categoria: str, tipo_area: str):
+    if tipo_area == "liderazgo":
+        system_prompt = (
+            "Eres un coach de vida y motivación personal.\n\n"
+            "Tu tarea: generar UNA frase motivadora BREVE para una persona adulta profesional.\n\n"
+            "REGLAS:\n"
+            "1. Máximo 4 líneas (50-60 palabras)\n"
+            "2. Tono cercano, humano, NO corporativo\n"
+            "3. NO menciones trabajo, liderazgo, equipo, oficina, productividad\n"
+            "4. Enfoque en: motivación personal, bienestar, mindset, paz mental, crecimiento, perspectiva\n"
+            "5. Que la persona se sienta mejor consigo misma al leerla\n"
+            "6. NO uses markdown\n"
+            f"7. Categoría: {categoria}\n"
+            "8. Texto plano, conversacional, como si fuera un mensaje de un amigo sabio\n"
+            "9. NO empieces con \"Querido líder\" ni nada formal\n\n"
+            "Responde SOLO con la frase. NO incluyas títulos, saludos, ni firma."
+        )
+        user_prompt = f"Genera una píldora de \"{categoria}\" de motivación personal y bienestar."
+    elif tipo_area == "operativa":
+        canal = "chat" if "chat" in area.lower() else "llamadas"
+        system_prompt = (
+            "Eres un experto en formación y calidad para agentes de servicio al cliente de COFREM "
+            "(Caja de Compensación Familiar del Meta, Colombia).\n\n"
+            f"Tu tarea: generar UNA píldora educativa BREVE y PRÁCTICA para un agente de \"{area}\" que atiende "
+            f"usuarios por {canal}.\n\n"
+            "REGLAS:\n"
+            "1. Máximo 4 líneas (60 palabras)\n"
+            "2. Tono cercano, no formal en exceso\n"
+            "3. Da un tip ACCIONABLE (algo que pueda aplicar HOY)\n"
+            "4. NO uses markdown\n"
+            "5. NO menciones COFREM en cada píldora\n"
+            f"6. Categoría: {categoria}\n"
+            f"7. Adaptada al canal: {canal}\n"
+            "8. Texto plano\n\n"
+            "Responde SOLO con la píldora. NO incluyas títulos, saludos, ni firma."
+        )
+        user_prompt = f"Genera una píldora de \"{categoria}\" para agentes de {canal}."
+    else:
+        dia_actual = DIAS_SEMANA[date.today().weekday()]
+        system_prompt = (
+            "Eres un amigo cercano y con humor que manda un mensaje motivador por WhatsApp.\n\n"
+            "Tu tarea: generar UNA frase motivadora BREVE sobre la VIDA en general — nunca sobre trabajo, oficina, "
+            "tareas o productividad.\n\n"
+            "REGLAS:\n"
+            "1. Máximo 3 líneas (40-50 palabras)\n"
+            "2. Tono relajado, con humor y picardía, como le hablarías a un amigo — nada de lenguaje corporativo\n"
+            f"3. Categoría: {categoria}\n"
+            f"4. Hoy es {dia_actual}: si encaja con la categoría, aprovechá el día con humor (ej. un viernes puede "
+            "ser algo como \"Por fin viernes y el cuerpo lo sabe jaja\"; un lunes algo sobre lo que cuesta arrancar "
+            "la semana), pero no lo fuerces si no pega\n"
+            "5. NO uses markdown\n"
+            "6. PROHIBIDO mencionar trabajo, oficina, equipo, jefe, productividad, metas o procesos — es un mensaje "
+            "de vida, no de trabajo\n"
+            "7. Texto plano\n\n"
+            "Responde SOLO con la frase motivadora. NO incluyas títulos ni firma."
+        )
+        user_prompt = f"Genera una píldora de \"{categoria}\" de motivación de vida, teniendo en cuenta que hoy es {dia_actual}."
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": {
+            "temperature": 0.8,
+            "maxOutputTokens": 300,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.post(url, json=payload, timeout=30.0)
+            if res.status_code != 200:
+                print(f"❌ Error Gemini píldora: {res.text}")
+                return None
+            data = res.json()
+            candidates = data.get("candidates")
+            if candidates and candidates[0].get("content", {}).get("parts"):
+                return candidates[0]["content"]["parts"][0].get("text", "").strip()
+            return None
+        except Exception as e:
+            print(f"❌ Error generando píldora: {e}")
+            return None
+
+
+async def enviar_plantilla_pildora(numero: str, pildora: str, categoria: str, area: str) -> bool:
+    url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "template",
+        "template": {
+            "name": PD_TEMPLATE_NAME,
+            "language": {"code": PD_TEMPLATE_LANG},
+            "components": [
+                {"type": "header", "parameters": [{"type": "image", "image": {"link": PD_IMAGEN_URL}}]},
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": "0",
+                    "parameters": [{"type": "payload", "payload": f"PILDORA_VER_{int(time.time())}"}],
+                },
+            ],
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando plantilla píldora a {numero}: [{res.status_code}] {res.text}")
+            return False
+
+    await _sb_upsert("pildoras_pendientes", {
+        "numero": numero, "pildora": pildora, "categoria": categoria, "area": area,
+    })
+    return True
+
+
+async def enviar_pildora_al_asesor(numero: str):
+    filas = await _sb_get("pildoras_pendientes", {"numero": f"eq.{numero}", "select": "*"})
+    if not filas:
+        return
+
+    data = filas[0]
+    mensaje = (
+        "🎓 *Píldora del día*\n\n"
+        f"📚 {data['categoria']}\n\n"
+        f"{data['pildora']}\n\n"
+        "_— Du Academy_"
+    )
+    await enviar_mensaje_interactivo(numero, mensaje)
+
+
+async def enviar_mensaje_interactivo(numero: str, texto: str):
+    url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": texto},
+            "action": {"buttons": [{"type": "reply", "reply": {"id": "pildora_aplicare", "title": "👍 Lo aplicaré"}}]},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando interactivo: [{res.status_code}] {res.text}")
+
+
+async def registrar_aplicare(numero: str):
+    filas = await _sb_get("pildoras_pendientes", {"numero": f"eq.{numero}", "select": "area"})
+    if filas:
+        area = filas[0]["area"]
+        hoy = date.today().isoformat()
+        filas_hoy = await _sb_get("pildoras_enviadas", {
+            "fecha": f"eq.{hoy}", "area": f"eq.{area}", "select": "id,aplicaran",
+        })
+        if filas_hoy:
+            fila = filas_hoy[0]
+            nuevo_valor = (fila.get("aplicaran") or 0) + 1
+            await _sb_patch("pildoras_enviadas", {"id": f"eq.{fila['id']}"}, {"aplicaran": nuevo_valor})
+
+    nombre = await buscar_asesora(numero) or ""
+    saludo = f"¡Genial {nombre}! 🙌" if nombre else "¡Genial! 🙌"
+    mensaje = f"{saludo}\n\nTu compromiso de aplicarla quedó registrado.\n\nQue tengas un excelente día. ☀️"
+    await despachar_mensaje_whatsapp(numero, mensaje)
+
+
+async def enviar_pildora_del_dia():
+    hoy = date.today()
+    if hoy.weekday() == 6:
+        print("⏭️ Hoy es domingo, no se envían píldoras")
+        return
+    if es_festivo(hoy):
+        print("⏭️ Hoy es festivo, no se envían píldoras")
+        return
+
+    asesoras = await _sb_get("asesoras", {"select": "nombre,numero,area"})
+    asesoras = [a for a in asesoras if a.get("area")]
+    if not asesoras:
+        print("⚠️ No hay asesoras con área asignada")
+        return
+
+    grupos = {}
+    for a in asesoras:
+        grupos.setdefault(a["area"], []).append(a)
+
+    for area, lista in grupos.items():
+        tipo_area = identificar_tipo_area(area)
+        categoria = seleccionar_categoria(tipo_area)
+        pildora = await generar_pildora_gemini(area, categoria, tipo_area)
+        if not pildora:
+            print(f"❌ No se pudo generar píldora para {area}")
+            continue
+
+        enviados = 0
+        for asesora in lista:
+            ok = await enviar_plantilla_pildora(asesora["numero"], pildora, categoria, area)
+            if ok:
+                enviados += 1
+
+        await _sb_post("pildoras_enviadas", {
+            "fecha": hoy.isoformat(), "area": area, "categoria": categoria,
+            "pildora": pildora, "total_enviadas": enviados, "aplicaran": 0,
+        })
+        print(f"✅ {enviados} píldoras enviadas para {area}")
+
+
+@app.get("/api/cron-pildoras")
+async def cron_pildoras(request: Request):
+    if CRON_SECRET and request.headers.get("authorization") != f"Bearer {CRON_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+    await enviar_pildora_del_dia()
+    return _ok()
