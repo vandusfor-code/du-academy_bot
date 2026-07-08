@@ -1170,6 +1170,22 @@ def _badge_delta(hoy: int, ayer: int) -> str:
     return '<span class="badge badge-flat">— 0%</span>'
 
 
+def _dias_desde(iso_str: str) -> int:
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).days
+    except Exception:
+        return 0
+
+
+_PILL_ESTADO = {
+    "PENDIENTE_ACEPTACION": ("Sin abrir", "pill-red"),
+    "AUDITORIA_LEIDA": ("Sin compromiso", "pill-amber"),
+    "COMPROMISO_RECIBIDO": ("Generando PDF", "pill-blue"),
+    "CERRADA": ("Cerrada", "pill-green"),
+}
+
+
 @app.get("/admin")
 async def dashboard_admin(ok: bool = Depends(verificar_admin)):
     asesoras = await _sb_get("asesoras", {"select": "numero,nombre,usuario,area"})
@@ -1180,7 +1196,9 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
         "order": "created_at.desc", "limit": "500",
     })
 
-    auditorias = await _sb_get("auditorias_consolidadas", {"select": "estado"})
+    auditorias = await _sb_get("auditorias_consolidadas", {
+        "select": "nombre_asesora,estado,fecha_envio",
+    })
     hoy_str = date.today().isoformat()
     ayer_str = (date.today() - timedelta(days=1)).isoformat()
 
@@ -1233,6 +1251,18 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
         _barra_html(etiquetas_estado.get(e, e), conteo_estados.get(e, 0), max_estado) for e in orden_estados
     )
 
+    # ── Auditorías pendientes — quién falta, ordenado por más vieja primero ──
+    pendientes_auditoria = [a for a in auditorias if a["estado"] != "CERRADA"]
+    pendientes_auditoria.sort(key=lambda a: a.get("fecha_envio") or "")
+    filas_pendientes = "".join(
+        (lambda etq, cls: (
+            f"<tr><td>{html_lib.escape(a['nombre_asesora'])}</td>"
+            f"<td><span class='pill {cls}'>{etq}</span></td>"
+            f"<td class='fecha-chica'>{_dias_desde(a['fecha_envio'])} día(s)</td></tr>"
+        ))(*_PILL_ESTADO.get(a["estado"], (a["estado"], "pill-blue")))
+        for a in pendientes_auditoria
+    ) or "<tr><td colspan='3' class='vacio'>Nadie pendiente — todas cerradas ✅</td></tr>"
+
     # ── Píldoras de hoy — detalle ──
     filas_pildoras = "".join(
         f"<tr><td>{html_lib.escape(p['area'])}</td><td>{html_lib.escape(p['categoria'])}</td>"
@@ -1250,6 +1280,11 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
 
     hoy_legible = date.today().strftime("%d %b %Y")
 
+    ICON_ASESORAS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'
+    ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+    ICON_PILDORA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10.5 20.5 10-10a4.95 4.95 0 1 0-7-7l-10 10a4.95 4.95 0 1 0 7 7Z"/><path d="m8.5 8.5 7 7"/></svg>'
+    ICON_AUDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/></svg>'
+
     html_final = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1259,70 +1294,92 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {{
-    --bg:#0b0b0c; --panel:#151517; --panel-2:#1d1d20; --border:#2a2a2e;
-    --lime:#a4d65e; --lime-dim:#7fae3e; --text:#f2f2f2; --muted:#9a9a9f;
-    --red:#e2665a;
+    --bg:#0a0a0b; --panel:#141416; --panel-2:#1c1c1f; --border:#26262a;
+    --lime:#a4d65e; --lime-dim:#7fae3e; --lime-soft:#c8e895; --text:#f5f5f6; --muted:#8f8f96;
+    --red:#e2665a; --amber:#e0a83a; --blue:#5b9bd6;
   }}
   * {{ box-sizing:border-box; }}
-  body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; }}
-  .topbar {{ display:flex; align-items:center; justify-content:space-between; padding:18px 28px; border-bottom:1px solid var(--border); background:var(--panel); }}
-  .brand {{ display:flex; align-items:center; gap:10px; font-weight:700; font-size:18px; }}
-  .brand .dot {{ width:10px; height:10px; border-radius:50%; background:var(--lime); box-shadow:0 0 12px var(--lime); }}
-  .brand .sub {{ color:var(--muted); font-weight:400; font-size:13px; margin-left:6px; }}
+  body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; -webkit-font-smoothing:antialiased; }}
+
+  .topbar {{ display:flex; align-items:center; justify-content:space-between; padding:16px 32px; border-bottom:1px solid var(--border); background:rgba(20,20,22,0.85); backdrop-filter:blur(10px); position:sticky; top:0; z-index:10; }}
+  .brand {{ display:flex; align-items:center; gap:10px; font-weight:700; font-size:17px; }}
+  .brand .dot {{ width:9px; height:9px; border-radius:50%; background:var(--lime); box-shadow:0 0 10px var(--lime); }}
+  .navpills {{ display:flex; gap:6px; background:var(--panel-2); padding:4px; border-radius:12px; }}
+  .navpills span {{ padding:8px 16px; border-radius:9px; font-size:13px; color:var(--muted); cursor:default; }}
+  .navpills span.active {{ background:var(--panel); color:var(--text); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,0.3); }}
   .profile {{ display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }}
-  .profile .avatar {{ width:34px; height:34px; border-radius:50%; background:var(--lime); color:#0b0b0c; display:flex; align-items:center; justify-content:center; font-weight:700; }}
-  main {{ padding:28px; max-width:1280px; margin:0 auto; }}
-  .header-row {{ display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:22px; flex-wrap:wrap; gap:10px; }}
-  .header-row h1 {{ margin:0; font-size:26px; }}
+  .profile .avatar {{ width:32px; height:32px; border-radius:50%; background:var(--lime); color:#0b0b0c; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; }}
+
+  main {{ padding:32px 40px 60px; max-width:1720px; margin:0 auto; width:100%; }}
+  .header-row {{ display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:24px; flex-wrap:wrap; gap:10px; }}
+  .header-row h1 {{ margin:0; font-size:26px; letter-spacing:-0.4px; }}
   .header-row .fecha {{ color:var(--muted); font-size:13px; }}
 
-  .kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:28px; }}
-  .kpi {{ background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:20px; position:relative; overflow:hidden; }}
-  .kpi.hero {{ background:linear-gradient(135deg, var(--lime) 0%, var(--lime-dim) 100%); color:#0b0b0c; border:none; }}
-  .kpi-top {{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:14px; }}
-  .kpi-icon {{ width:36px; height:36px; border-radius:10px; background:rgba(164,214,94,0.15); display:flex; align-items:center; justify-content:center; font-size:18px; }}
-  .kpi.hero .kpi-icon {{ background:rgba(0,0,0,0.15); }}
-  .kpi-label {{ font-size:13px; color:var(--muted); margin-bottom:6px; }}
-  .kpi.hero .kpi-label {{ color:rgba(0,0,0,0.65); }}
-  .kpi-value {{ font-size:32px; font-weight:800; letter-spacing:-0.5px; }}
-  .badge {{ font-size:11px; font-weight:700; padding:3px 8px; border-radius:20px; white-space:nowrap; }}
+  .kpi-grid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:18px; margin-bottom:22px; }}
+  @media (max-width:1100px) {{ .kpi-grid {{ grid-template-columns:repeat(2,1fr); }} }}
+  .kpi {{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; position:relative; overflow:hidden; transition:transform .15s ease, border-color .15s ease; }}
+  .kpi:hover {{ transform:translateY(-2px); border-color:#3a3a40; }}
+  .kpi.hero {{ background:linear-gradient(140deg, var(--lime-soft) 0%, var(--lime) 55%, var(--lime-dim) 100%); color:#0b0b0c; border:none; }}
+  .kpi-top {{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; }}
+  .kpi-icon {{ width:38px; height:38px; border-radius:11px; background:rgba(164,214,94,0.12); display:flex; align-items:center; justify-content:center; color:var(--lime); }}
+  .kpi-icon svg {{ width:19px; height:19px; }}
+  .kpi.hero .kpi-icon {{ background:rgba(0,0,0,0.14); color:#0b0b0c; }}
+  .kpi-label {{ font-size:13px; color:var(--muted); margin-bottom:6px; font-weight:500; }}
+  .kpi.hero .kpi-label {{ color:rgba(0,0,0,0.62); }}
+  .kpi-value {{ font-size:34px; font-weight:800; letter-spacing:-0.8px; }}
+  .badge {{ font-size:11px; font-weight:700; padding:4px 9px; border-radius:20px; white-space:nowrap; }}
   .badge-up {{ background:rgba(164,214,94,0.15); color:var(--lime); }}
-  .kpi.hero .badge-up {{ background:rgba(0,0,0,0.15); color:#0b0b0c; }}
+  .kpi.hero .badge-up {{ background:rgba(0,0,0,0.14); color:#0b0b0c; }}
   .badge-down {{ background:rgba(226,102,90,0.15); color:var(--red); }}
-  .badge-flat {{ background:rgba(154,154,159,0.15); color:var(--muted); }}
+  .badge-flat {{ background:rgba(143,143,150,0.15); color:var(--muted); }}
 
-  .panel-grid {{ display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:16px; }}
-  @media (max-width:900px) {{ .panel-grid {{ grid-template-columns:1fr; }} }}
-  .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:22px; }}
-  .panel h2 {{ margin:0 0 4px 0; font-size:16px; color:var(--text); }}
-  .panel .subtitulo {{ color:var(--muted); font-size:12px; margin-bottom:16px; }}
+  .panel-grid {{ display:grid; grid-template-columns:1.4fr 1fr; gap:18px; margin-bottom:18px; }}
+  .panel-grid.equal {{ grid-template-columns:1fr 1fr; }}
+  @media (max-width:1000px) {{ .panel-grid, .panel-grid.equal {{ grid-template-columns:1fr; }} }}
+  .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:24px; }}
+  .panel h2 {{ margin:0 0 4px 0; font-size:15px; color:var(--text); font-weight:700; }}
+  .panel .subtitulo {{ color:var(--muted); font-size:12px; margin-bottom:18px; }}
 
   .gauge-wrap {{ display:flex; flex-direction:column; align-items:center; }}
-  .gauge-num {{ font-size:34px; font-weight:800; color:var(--lime); margin-top:-70px; }}
+  .gauge-num {{ font-size:36px; font-weight:800; color:var(--lime); margin-top:-72px; letter-spacing:-1px; }}
   .gauge-lbl {{ color:var(--muted); font-size:12px; }}
-  .gauge-sub {{ display:flex; justify-content:space-between; width:100%; margin-top:18px; padding-top:16px; border-top:1px solid var(--border); }}
+  .gauge-sub {{ display:flex; justify-content:space-around; width:100%; margin-top:20px; padding-top:18px; border-top:1px solid var(--border); }}
   .gauge-sub div {{ text-align:center; }}
-  .gauge-sub .n {{ font-size:18px; font-weight:700; }}
+  .gauge-sub .n {{ font-size:19px; font-weight:700; }}
   .gauge-sub .l {{ font-size:11px; color:var(--muted); }}
 
   table {{ width:100%; border-collapse:collapse; }}
-  th, td {{ text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); font-size:13px; }}
-  th {{ color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.05em; }}
+  th, td {{ text-align:left; padding:11px 10px; border-bottom:1px solid var(--border); font-size:13px; }}
+  th {{ color:var(--muted); font-weight:600; font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; }}
+  tbody tr:hover {{ background:var(--panel-2); }}
   .fecha-chica {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
   .vacio {{ color:var(--muted); font-style:italic; }}
 
-  .barra-fila {{ display:flex; align-items:center; gap:10px; margin:8px 0; }}
+  .pill {{ display:inline-block; font-size:11px; font-weight:700; padding:4px 10px; border-radius:20px; }}
+  .pill-red {{ background:rgba(226,102,90,0.15); color:var(--red); }}
+  .pill-amber {{ background:rgba(224,168,58,0.15); color:var(--amber); }}
+  .pill-blue {{ background:rgba(91,155,214,0.15); color:var(--blue); }}
+  .pill-green {{ background:rgba(164,214,94,0.15); color:var(--lime); }}
+
+  .barra-fila {{ display:flex; align-items:center; gap:10px; margin:9px 0; }}
   .barra-etiqueta {{ width:170px; font-size:13px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }}
   .barra-fondo {{ flex:1; background:var(--panel-2); border-radius:6px; height:14px; overflow:hidden; }}
   .barra-relleno {{ background:var(--lime); height:100%; border-radius:6px; }}
   .barra-valor {{ width:28px; text-align:right; font-size:13px; color:var(--lime); font-weight:600; }}
 
-  section {{ margin-top:16px; }}
+  section {{ margin-top:18px; }}
 </style>
 </head>
 <body>
   <div class="topbar">
-    <div class="brand"><span class="dot"></span> Du Academy <span class="sub">Panel de control</span></div>
+    <div class="brand"><span class="dot"></span> Du Academy</div>
+    <div class="navpills">
+      <span class="active">Resumen</span>
+      <span>Asesoras</span>
+      <span>Auditorías</span>
+      <span>Píldoras</span>
+      <span>Métricas</span>
+    </div>
     <div class="profile"><div class="avatar">D</div> Duvan Ramos</div>
   </div>
 
@@ -1334,24 +1391,24 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
 
     <div class="kpi-grid">
       <div class="kpi hero">
-        <div class="kpi-top"><div class="kpi-icon">👥</div></div>
+        <div class="kpi-top"><div class="kpi-icon">{ICON_ASESORAS}</div></div>
         <div class="kpi-label">Asesoras registradas</div>
         <div class="kpi-value">{len(asesoras)}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-top"><div class="kpi-icon">💬</div>{badge_mensajes}</div>
+        <div class="kpi-top"><div class="kpi-icon">{ICON_CHAT}</div>{badge_mensajes}</div>
         <div class="kpi-label">Preguntas al bot hoy</div>
         <div class="kpi-value">{mensajes_hoy}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-top"><div class="kpi-icon">🎓</div>{badge_pildoras}</div>
+        <div class="kpi-top"><div class="kpi-icon">{ICON_PILDORA}</div>{badge_pildoras}</div>
         <div class="kpi-label">Píldoras enviadas hoy</div>
         <div class="kpi-value">{total_enviadas_hoy}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-top"><div class="kpi-icon">📋</div></div>
-        <div class="kpi-label">Auditorías totales</div>
-        <div class="kpi-value">{len(auditorias)}</div>
+        <div class="kpi-top"><div class="kpi-icon">{ICON_AUDIT}</div></div>
+        <div class="kpi-label">Auditorías pendientes</div>
+        <div class="kpi-value">{len(pendientes_auditoria)}</div>
       </div>
     </div>
 
@@ -1376,6 +1433,22 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
       </div>
     </div>
 
+    <div class="panel-grid equal">
+      <section class="panel">
+        <h2>Auditorías pendientes — quién falta</h2>
+        <div class="subtitulo">Ordenadas por más antigua primero</div>
+        <table>
+          <tr><th>Asesora</th><th>Estado</th><th>Tiempo esperando</th></tr>
+          {filas_pendientes}
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Auditorías consolidadas</h2>
+        <div class="subtitulo">Distribución por estado (total)</div>
+        {filas_estados}
+      </section>
+    </div>
+
     <section class="panel">
       <h2>Preguntas recientes</h2>
       <div class="subtitulo">Últimas 20 preguntas al bot conversacional</div>
@@ -1385,31 +1458,25 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
       </table>
     </section>
 
-    <div class="panel-grid">
-      <section class="panel">
-        <h2>Auditorías consolidadas</h2>
-        <div class="subtitulo">Distribución por estado</div>
-        {filas_estados}
-      </section>
+    <div class="panel-grid equal">
       <section class="panel">
         <h2>Consultas de métricas</h2>
         <div class="subtitulo">Por asesora</div>
         {filas_metricas}
       </section>
+      <section class="panel">
+        <h2>Píldoras enviadas hoy</h2>
+        <div class="subtitulo">Detalle por área</div>
+        <table>
+          <tr><th>Área</th><th>Categoría</th><th>Enviadas</th><th>Aplicarán</th></tr>
+          {filas_pildoras}
+        </table>
+      </section>
     </div>
-
-    <section class="panel">
-      <h2>Píldoras enviadas hoy</h2>
-      <div class="subtitulo">Detalle por área</div>
-      <table>
-        <tr><th>Área</th><th>Categoría</th><th>Enviadas</th><th>Aplicarán</th></tr>
-        {filas_pildoras}
-      </table>
-    </section>
   </main>
 
   <script>
-    Chart.defaults.color = '#9a9a9f';
+    Chart.defaults.color = '#8f8f96';
     Chart.defaults.font.family = "-apple-system, Arial, sans-serif";
 
     new Chart(document.getElementById('graficoActividad'), {{
@@ -1422,7 +1489,7 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
         plugins: {{ legend: {{ display:false }} }},
         scales: {{
           x: {{ grid: {{ display:false }} }},
-          y: {{ grid: {{ color:'#2a2a2e' }}, beginAtZero:true, ticks: {{ precision:0 }} }}
+          y: {{ grid: {{ color:'#26262a' }}, beginAtZero:true, ticks: {{ precision:0 }} }}
         }}
       }}
     }});
@@ -1432,7 +1499,7 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
       data: {{
         datasets: [{{
           data: [{tasa_aplicacion}, {100 - tasa_aplicacion}],
-          backgroundColor: ['#a4d65e', '#2a2a2e'],
+          backgroundColor: ['#a4d65e', '#26262a'],
           borderWidth: 0,
         }}]
       }},
