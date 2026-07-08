@@ -814,7 +814,7 @@ async def solicitar_pdf(datos: dict, tipo: str):
         print("❌ PDF_SERVICE_URL no configurado")
         return None
     payload = {"secret": PDF_SERVICE_SECRET, "datos": datos, "tipo": tipo}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
             res = await client.post(PDF_SERVICE_URL, json=payload, timeout=45.0)
             if res.status_code != 200:
