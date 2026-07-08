@@ -196,6 +196,30 @@ async def obtener_manuales(pregunta: str):
     ]
 
 
+PALABRAS_TARIFA = {
+    "precio", "precios", "tarifa", "tarifas", "cuesta", "cuestan", "vale", "valen",
+    "cuanto", "valor", "cobra", "cobran", "costo", "costos",
+}
+
+
+async def buscar_tarifas(pregunta: str):
+    palabras_pregunta = _normalizar(pregunta)
+    if not palabras_pregunta & PALABRAS_TARIFA:
+        return []
+
+    filas = await _sb_get("tarifas", {"select": "producto,precio"})
+
+    relevantes = []
+    for f in filas:
+        palabras_producto = _normalizar(f["producto"])
+        coincidencias = len(palabras_pregunta & palabras_producto)
+        if coincidencias > 0:
+            relevantes.append((coincidencias, f))
+
+    relevantes.sort(key=lambda x: x[0], reverse=True)
+    return [f for _, f in relevantes[:8]]
+
+
 # ============================================================
 # CEREBRO DE DU — 1 sola llamada a Gemini con prioridad de fuentes + memoria
 # ============================================================
@@ -203,6 +227,7 @@ async def obtener_manuales(pregunta: str):
 async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: str) -> str:
     historial = await obtener_historial(numero)
     archivos_parts = await obtener_manuales(mensaje_usuario)
+    tarifas_encontradas = await buscar_tarifas(mensaje_usuario)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
@@ -219,13 +244,17 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "mi área 😅 Yo solo manejo temas de Cofrem. ¿Te ayudo con algo de un trámite o proceso?\" (podés variar el tono "
         "pero NUNCA contestar el dato en sí).\n\n"
         "ORDEN DE PRIORIDAD DE FUENTES para preguntas que SÍ son de Cofrem (decide tú misma cuál usar, sin avisar el proceso):\n"
-        "1. Primero revisa los documentos PDF adjuntos (manuales internos oficiales). Si el dato está ahí, respóndelo basado en eso.\n"
-        "2. Si no está en los documentos, usa la búsqueda web pero confía SOLO en resultados de cofrem.com.co.\n"
-        "3. Si tampoco encuentras nada ahí, podés buscar en la web general, pero SIEMPRE específicamente sobre COFREM "
+        "1. Si la pregunta es sobre tarifas o precios de un servicio, y te paso un bloque \"TARIFAS ENCONTRADAS\" junto con "
+        "el mensaje, esa es la fuente autoritativa y exacta — respondé con eso, no busques en otro lado. Si el bloque viene "
+        "vacío o no trae el servicio/categoría exacta que preguntan, decilo honestamente en vez de inventar un precio.\n"
+        "2. Para todo lo demás, revisa primero los documentos PDF adjuntos (manuales internos oficiales). Si el dato está "
+        "ahí, respóndelo basado en eso.\n"
+        "3. Si no está en los documentos, usa la búsqueda web pero confía SOLO en resultados de cofrem.com.co.\n"
+        "4. Si tampoco encuentras nada ahí, podés buscar en la web general, pero SIEMPRE específicamente sobre COFREM "
         "(nunca sobre otras cajas de compensación como Comfama, Compensar, Cafam, Colsubsidio, etc. — aunque el trámite o "
         "tema exista en cualquier caja, la respuesta tiene que ser la versión y las reglas propias de Cofrem, nunca la de otra "
         "caja aunque parezca aplicar igual). Aclará en tu respuesta que es información general no oficial y que debe validarse.\n"
-        "4. Si de verdad no encontrás nada sobre Cofrem en ninguna fuente, decilo honestamente: no inventes, no asumas, y "
+        "5. Si de verdad no encontrás nada sobre Cofrem en ninguna fuente, decilo honestamente: no inventes, no asumas, y "
         "nunca completes con información de otra caja de compensación aunque sea parecida.\n\n"
         f"REGLA DE ORO - BREVEDAD: {nombre_asesora} probablemente está EN VIVO con un usuario esperando. "
         "Responde en máximo 3-4 líneas o 3 puntos clave.\n\n"
@@ -241,8 +270,16 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "- NUNCA anuncies \"voy a buscar en tal parte\" ni menciones tu proceso interno de búsqueda: responde directo con la información."
     )
 
+    if tarifas_encontradas:
+        lineas_tarifas = "\n".join(f"- {t['producto']}: {t['precio']}" for t in tarifas_encontradas)
+        texto_tarifas = f"\n\nTARIFAS ENCONTRADAS:\n{lineas_tarifas}"
+    else:
+        texto_tarifas = ""
+
     contenido_historial = [{"role": h["rol"], "parts": [{"text": h["texto"]}]} for h in historial]
-    contents = contenido_historial + [{"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario}]}]
+    contents = contenido_historial + [
+        {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_tarifas}]}
+    ]
 
     payload = {
         "contents": contents,
