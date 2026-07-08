@@ -3,12 +3,17 @@ import re
 import time
 import json
 import random
+import secrets
+import html as html_lib
 import unicodedata
+from collections import Counter
 from datetime import date, datetime, timezone
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Depends, HTTPException
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 app = FastAPI()
+security = HTTPBasic()
 
 AC_PHONE_NUMBER_ID = os.environ["AC_PHONE_NUMBER_ID"]
 AC_ACCESS_TOKEN = os.environ["AC_ACCESS_TOKEN"]
@@ -26,6 +31,7 @@ AC_TEMPLATE_NAME = os.environ.get("AC_TEMPLATE_NAME", "primer_contacto")
 AC_TEMPLATE_LANG = os.environ.get("AC_TEMPLATE_LANG", "es_CO")
 PDF_SERVICE_URL = os.environ.get("PDF_SERVICE_URL", "")
 PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -1023,6 +1029,7 @@ async def procesar_respuesta_metricas(numero: str, texto: str) -> bool:
         return True
 
     await _sb_delete("metricas_pendientes", {"numero": f"eq.{numero}"})
+    await _sb_post("metricas_solicitudes", {"numero": numero, "usuario": asesora.get("usuario")})
 
     metricas = await _sb_get("metricas_asesoras", {
         "usuario": f"eq.{asesora['usuario']}", "select": "metrica,valor,fecha",
@@ -1086,3 +1093,152 @@ async def enviar_imagen_whatsapp(numero: str, image_url: str, caption: str = "")
         res = await client.post(url, json=payload, headers=headers, timeout=15.0)
         if res.status_code != 200:
             print(f"❌ Error enviando imagen: [{res.status_code}] {res.text}")
+
+
+# ============================================================
+# DASHBOARD ADMIN
+# ============================================================
+
+def verificar_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    clave_ok = bool(ADMIN_PASSWORD) and secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+    if not clave_ok:
+        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    return True
+
+
+def _barra_html(etiqueta: str, valor: int, maximo: int) -> str:
+    pct = round((valor / maximo) * 100) if maximo else 0
+    return f"""
+    <div class="barra-fila">
+      <div class="barra-etiqueta">{html_lib.escape(str(etiqueta))}</div>
+      <div class="barra-fondo"><div class="barra-relleno" style="width:{pct}%"></div></div>
+      <div class="barra-valor">{valor}</div>
+    </div>"""
+
+
+@app.get("/admin")
+async def dashboard_admin(ok: bool = Depends(verificar_admin)):
+    asesoras = await _sb_get("asesoras", {"select": "numero,nombre,usuario,area"})
+    mapa_nombres = {a["numero"]: a["nombre"] for a in asesoras}
+
+    historial = await _sb_get("historial_conversaciones", {
+        "rol": "eq.user", "select": "numero,texto,created_at",
+        "order": "created_at.desc", "limit": "500",
+    })
+
+    auditorias = await _sb_get("auditorias_consolidadas", {"select": "estado"})
+    hoy = date.today().isoformat()
+    pildoras_hoy = await _sb_get("pildoras_enviadas", {
+        "fecha": f"eq.{hoy}", "select": "area,categoria,total_enviadas,aplicaran",
+    })
+    solicitudes_metricas = await _sb_get("metricas_solicitudes", {"select": "numero,usuario"})
+
+    # ── Actividad por asesora ──
+    conteo_mensajes = Counter(h["numero"] for h in historial)
+    top_actividad = conteo_mensajes.most_common(15)
+    max_actividad = max((c for _, c in top_actividad), default=1)
+    filas_actividad = "".join(
+        _barra_html(mapa_nombres.get(num, num), cant, max_actividad) for num, cant in top_actividad
+    ) or "<p class='vacio'>Sin mensajes todavía.</p>"
+
+    # ── Preguntas recientes ──
+    recientes = historial[:20]
+    filas_recientes = "".join(
+        f"<tr><td>{html_lib.escape(mapa_nombres.get(h['numero'], h['numero']))}</td>"
+        f"<td>{html_lib.escape(h['texto'][:120])}</td>"
+        f"<td class='fecha-chica'>{html_lib.escape(str(h['created_at'])[:16].replace('T', ' '))}</td></tr>"
+        for h in recientes
+    ) or "<tr><td colspan='3' class='vacio'>Sin preguntas todavía.</td></tr>"
+
+    # ── Auditorías por estado ──
+    conteo_estados = Counter(a["estado"] for a in auditorias)
+    orden_estados = ["PENDIENTE_ACEPTACION", "AUDITORIA_LEIDA", "COMPROMISO_RECIBIDO", "CERRADA"]
+    etiquetas_estado = {
+        "PENDIENTE_ACEPTACION": "Enviada, sin abrir",
+        "AUDITORIA_LEIDA": "Leída, sin compromiso",
+        "COMPROMISO_RECIBIDO": "Compromiso recibido",
+        "CERRADA": "Cerrada (con PDF final)",
+    }
+    max_estado = max(conteo_estados.values(), default=1)
+    filas_estados = "".join(
+        _barra_html(etiquetas_estado.get(e, e), conteo_estados.get(e, 0), max_estado) for e in orden_estados
+    )
+
+    # ── Píldoras de hoy ──
+    total_enviadas_hoy = sum(p["total_enviadas"] or 0 for p in pildoras_hoy)
+    total_aplicaron_hoy = sum(p["aplicaran"] or 0 for p in pildoras_hoy)
+    tasa_aplicacion = round((total_aplicaron_hoy / total_enviadas_hoy) * 100) if total_enviadas_hoy else 0
+    filas_pildoras = "".join(
+        f"<tr><td>{html_lib.escape(p['area'])}</td><td>{html_lib.escape(p['categoria'])}</td>"
+        f"<td>{p['total_enviadas']}</td><td>{p['aplicaran']}</td></tr>"
+        for p in pildoras_hoy
+    ) or "<tr><td colspan='4' class='vacio'>Sin píldoras enviadas hoy.</td></tr>"
+
+    # ── Métricas solicitadas por asesora ──
+    conteo_metricas = Counter(s["numero"] for s in solicitudes_metricas)
+    top_metricas = conteo_metricas.most_common(15)
+    max_metricas = max((c for _, c in top_metricas), default=1)
+    filas_metricas = "".join(
+        _barra_html(mapa_nombres.get(num, num), cant, max_metricas) for num, cant in top_metricas
+    ) or "<p class='vacio'>Nadie consultó sus métricas todavía.</p>"
+
+    html_final = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Du Academy — Dashboard</title>
+<style>
+  body {{ font-family: -apple-system, Arial, sans-serif; background:#0d0d0d; color:#eee; margin:0; padding:24px; }}
+  h1 {{ color:#fff; }}
+  h2 {{ color:#a4d65e; border-bottom:1px solid #333; padding-bottom:6px; margin-top:36px; }}
+  .grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin:16px 0; }}
+  .tarjeta {{ background:#1a1a1a; border-radius:10px; padding:16px; }}
+  .tarjeta .num {{ font-size:28px; font-weight:bold; color:#a4d65e; }}
+  .tarjeta .lbl {{ font-size:13px; color:#aaa; }}
+  table {{ width:100%; border-collapse:collapse; margin-top:8px; }}
+  th, td {{ text-align:left; padding:8px; border-bottom:1px solid #222; font-size:14px; }}
+  th {{ color:#a4d65e; }}
+  .fecha-chica {{ color:#888; font-size:12px; white-space:nowrap; }}
+  .vacio {{ color:#666; font-style:italic; }}
+  .barra-fila {{ display:flex; align-items:center; gap:10px; margin:6px 0; }}
+  .barra-etiqueta {{ width:160px; font-size:13px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .barra-fondo {{ flex:1; background:#222; border-radius:6px; height:16px; overflow:hidden; }}
+  .barra-relleno {{ background:#a4d65e; height:100%; }}
+  .barra-valor {{ width:30px; text-align:right; font-size:13px; color:#a4d65e; }}
+</style>
+</head>
+<body>
+  <h1>Du Academy — Dashboard</h1>
+
+  <div class="grid">
+    <div class="tarjeta"><div class="num">{len(asesoras)}</div><div class="lbl">Asesoras registradas</div></div>
+    <div class="tarjeta"><div class="num">{len(historial)}</div><div class="lbl">Preguntas al bot (últimas 500)</div></div>
+    <div class="tarjeta"><div class="num">{total_enviadas_hoy}</div><div class="lbl">Píldoras enviadas hoy</div></div>
+    <div class="tarjeta"><div class="num">{tasa_aplicacion}%</div><div class="lbl">Tasa "lo aplicaré" hoy</div></div>
+  </div>
+
+  <h2>Actividad del bot conversacional (por asesora)</h2>
+  {filas_actividad}
+
+  <h2>Preguntas recientes</h2>
+  <table>
+    <tr><th>Asesora</th><th>Pregunta</th><th>Fecha</th></tr>
+    {filas_recientes}
+  </table>
+
+  <h2>Auditorías consolidadas — por estado</h2>
+  {filas_estados}
+
+  <h2>Píldoras enviadas hoy — detalle por área</h2>
+  <table>
+    <tr><th>Área</th><th>Categoría</th><th>Enviadas</th><th>Aplicarán</th></tr>
+    {filas_pildoras}
+  </table>
+
+  <h2>Consultas de métricas (por asesora)</h2>
+  {filas_metricas}
+
+</body>
+</html>"""
+
+    return Response(content=html_final, media_type="text/html")
