@@ -7,7 +7,7 @@ import secrets
 import html as html_lib
 import unicodedata
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import httpx
 from fastapi import FastAPI, Request, Response, Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -1116,6 +1116,19 @@ def _barra_html(etiqueta: str, valor: int, maximo: int) -> str:
     </div>"""
 
 
+def _badge_delta(hoy: int, ayer: int) -> str:
+    if ayer == 0:
+        if hoy == 0:
+            return ""
+        return '<span class="badge badge-up">▲ nuevo</span>'
+    delta = round(((hoy - ayer) / ayer) * 100)
+    if delta > 0:
+        return f'<span class="badge badge-up">▲ {delta}%</span>'
+    if delta < 0:
+        return f'<span class="badge badge-down">▼ {abs(delta)}%</span>'
+    return '<span class="badge badge-flat">— 0%</span>'
+
+
 @app.get("/admin")
 async def dashboard_admin(ok: bool = Depends(verificar_admin)):
     asesoras = await _sb_get("asesoras", {"select": "numero,nombre,usuario,area"})
@@ -1127,19 +1140,34 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
     })
 
     auditorias = await _sb_get("auditorias_consolidadas", {"select": "estado"})
-    hoy = date.today().isoformat()
+    hoy_str = date.today().isoformat()
+    ayer_str = (date.today() - timedelta(days=1)).isoformat()
+
     pildoras_hoy = await _sb_get("pildoras_enviadas", {
-        "fecha": f"eq.{hoy}", "select": "area,categoria,total_enviadas,aplicaran",
+        "fecha": f"eq.{hoy_str}", "select": "area,categoria,total_enviadas,aplicaran",
+    })
+    pildoras_ayer = await _sb_get("pildoras_enviadas", {
+        "fecha": f"eq.{ayer_str}", "select": "total_enviadas",
     })
     solicitudes_metricas = await _sb_get("metricas_solicitudes", {"select": "numero,usuario"})
 
-    # ── Actividad por asesora ──
+    # ── Deltas reales hoy vs ayer ──
+    mensajes_hoy = sum(1 for h in historial if str(h["created_at"])[:10] == hoy_str)
+    mensajes_ayer = sum(1 for h in historial if str(h["created_at"])[:10] == ayer_str)
+    badge_mensajes = _badge_delta(mensajes_hoy, mensajes_ayer)
+
+    total_enviadas_hoy = sum(p["total_enviadas"] or 0 for p in pildoras_hoy)
+    total_enviadas_ayer = sum(p["total_enviadas"] or 0 for p in pildoras_ayer)
+    badge_pildoras = _badge_delta(total_enviadas_hoy, total_enviadas_ayer)
+
+    total_aplicaron_hoy = sum(p["aplicaran"] or 0 for p in pildoras_hoy)
+    tasa_aplicacion = round((total_aplicaron_hoy / total_enviadas_hoy) * 100) if total_enviadas_hoy else 0
+
+    # ── Actividad por asesora (para el grafico de barras) ──
     conteo_mensajes = Counter(h["numero"] for h in historial)
-    top_actividad = conteo_mensajes.most_common(15)
-    max_actividad = max((c for _, c in top_actividad), default=1)
-    filas_actividad = "".join(
-        _barra_html(mapa_nombres.get(num, num), cant, max_actividad) for num, cant in top_actividad
-    ) or "<p class='vacio'>Sin mensajes todavía.</p>"
+    top_actividad = conteo_mensajes.most_common(10)
+    labels_actividad = json.dumps([mapa_nombres.get(n, n) for n, _ in top_actividad])
+    valores_actividad = json.dumps([c for _, c in top_actividad])
 
     # ── Preguntas recientes ──
     recientes = historial[:20]
@@ -1164,10 +1192,7 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
         _barra_html(etiquetas_estado.get(e, e), conteo_estados.get(e, 0), max_estado) for e in orden_estados
     )
 
-    # ── Píldoras de hoy ──
-    total_enviadas_hoy = sum(p["total_enviadas"] or 0 for p in pildoras_hoy)
-    total_aplicaron_hoy = sum(p["aplicaran"] or 0 for p in pildoras_hoy)
-    tasa_aplicacion = round((total_aplicaron_hoy / total_enviadas_hoy) * 100) if total_enviadas_hoy else 0
+    # ── Píldoras de hoy — detalle ──
     filas_pildoras = "".join(
         f"<tr><td>{html_lib.escape(p['area'])}</td><td>{html_lib.escape(p['categoria'])}</td>"
         f"<td>{p['total_enviadas']}</td><td>{p['aplicaran']}</td></tr>"
@@ -1182,62 +1207,200 @@ async def dashboard_admin(ok: bool = Depends(verificar_admin)):
         _barra_html(mapa_nombres.get(num, num), cant, max_metricas) for num, cant in top_metricas
     ) or "<p class='vacio'>Nadie consultó sus métricas todavía.</p>"
 
+    hoy_legible = date.today().strftime("%d %b %Y")
+
     html_final = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Du Academy — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-  body {{ font-family: -apple-system, Arial, sans-serif; background:#0d0d0d; color:#eee; margin:0; padding:24px; }}
-  h1 {{ color:#fff; }}
-  h2 {{ color:#a4d65e; border-bottom:1px solid #333; padding-bottom:6px; margin-top:36px; }}
-  .grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin:16px 0; }}
-  .tarjeta {{ background:#1a1a1a; border-radius:10px; padding:16px; }}
-  .tarjeta .num {{ font-size:28px; font-weight:bold; color:#a4d65e; }}
-  .tarjeta .lbl {{ font-size:13px; color:#aaa; }}
-  table {{ width:100%; border-collapse:collapse; margin-top:8px; }}
-  th, td {{ text-align:left; padding:8px; border-bottom:1px solid #222; font-size:14px; }}
-  th {{ color:#a4d65e; }}
-  .fecha-chica {{ color:#888; font-size:12px; white-space:nowrap; }}
-  .vacio {{ color:#666; font-style:italic; }}
-  .barra-fila {{ display:flex; align-items:center; gap:10px; margin:6px 0; }}
-  .barra-etiqueta {{ width:160px; font-size:13px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-  .barra-fondo {{ flex:1; background:#222; border-radius:6px; height:16px; overflow:hidden; }}
-  .barra-relleno {{ background:#a4d65e; height:100%; }}
-  .barra-valor {{ width:30px; text-align:right; font-size:13px; color:#a4d65e; }}
+  :root {{
+    --bg:#0b0b0c; --panel:#151517; --panel-2:#1d1d20; --border:#2a2a2e;
+    --lime:#a4d65e; --lime-dim:#7fae3e; --text:#f2f2f2; --muted:#9a9a9f;
+    --red:#e2665a;
+  }}
+  * {{ box-sizing:border-box; }}
+  body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; }}
+  .topbar {{ display:flex; align-items:center; justify-content:space-between; padding:18px 28px; border-bottom:1px solid var(--border); background:var(--panel); }}
+  .brand {{ display:flex; align-items:center; gap:10px; font-weight:700; font-size:18px; }}
+  .brand .dot {{ width:10px; height:10px; border-radius:50%; background:var(--lime); box-shadow:0 0 12px var(--lime); }}
+  .brand .sub {{ color:var(--muted); font-weight:400; font-size:13px; margin-left:6px; }}
+  .profile {{ display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }}
+  .profile .avatar {{ width:34px; height:34px; border-radius:50%; background:var(--lime); color:#0b0b0c; display:flex; align-items:center; justify-content:center; font-weight:700; }}
+  main {{ padding:28px; max-width:1280px; margin:0 auto; }}
+  .header-row {{ display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:22px; flex-wrap:wrap; gap:10px; }}
+  .header-row h1 {{ margin:0; font-size:26px; }}
+  .header-row .fecha {{ color:var(--muted); font-size:13px; }}
+
+  .kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:28px; }}
+  .kpi {{ background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:20px; position:relative; overflow:hidden; }}
+  .kpi.hero {{ background:linear-gradient(135deg, var(--lime) 0%, var(--lime-dim) 100%); color:#0b0b0c; border:none; }}
+  .kpi-top {{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:14px; }}
+  .kpi-icon {{ width:36px; height:36px; border-radius:10px; background:rgba(164,214,94,0.15); display:flex; align-items:center; justify-content:center; font-size:18px; }}
+  .kpi.hero .kpi-icon {{ background:rgba(0,0,0,0.15); }}
+  .kpi-label {{ font-size:13px; color:var(--muted); margin-bottom:6px; }}
+  .kpi.hero .kpi-label {{ color:rgba(0,0,0,0.65); }}
+  .kpi-value {{ font-size:32px; font-weight:800; letter-spacing:-0.5px; }}
+  .badge {{ font-size:11px; font-weight:700; padding:3px 8px; border-radius:20px; white-space:nowrap; }}
+  .badge-up {{ background:rgba(164,214,94,0.15); color:var(--lime); }}
+  .kpi.hero .badge-up {{ background:rgba(0,0,0,0.15); color:#0b0b0c; }}
+  .badge-down {{ background:rgba(226,102,90,0.15); color:var(--red); }}
+  .badge-flat {{ background:rgba(154,154,159,0.15); color:var(--muted); }}
+
+  .panel-grid {{ display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:16px; }}
+  @media (max-width:900px) {{ .panel-grid {{ grid-template-columns:1fr; }} }}
+  .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:22px; }}
+  .panel h2 {{ margin:0 0 4px 0; font-size:16px; color:var(--text); }}
+  .panel .subtitulo {{ color:var(--muted); font-size:12px; margin-bottom:16px; }}
+
+  .gauge-wrap {{ display:flex; flex-direction:column; align-items:center; }}
+  .gauge-num {{ font-size:34px; font-weight:800; color:var(--lime); margin-top:-70px; }}
+  .gauge-lbl {{ color:var(--muted); font-size:12px; }}
+  .gauge-sub {{ display:flex; justify-content:space-between; width:100%; margin-top:18px; padding-top:16px; border-top:1px solid var(--border); }}
+  .gauge-sub div {{ text-align:center; }}
+  .gauge-sub .n {{ font-size:18px; font-weight:700; }}
+  .gauge-sub .l {{ font-size:11px; color:var(--muted); }}
+
+  table {{ width:100%; border-collapse:collapse; }}
+  th, td {{ text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); font-size:13px; }}
+  th {{ color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.05em; }}
+  .fecha-chica {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+  .vacio {{ color:var(--muted); font-style:italic; }}
+
+  .barra-fila {{ display:flex; align-items:center; gap:10px; margin:8px 0; }}
+  .barra-etiqueta {{ width:170px; font-size:13px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }}
+  .barra-fondo {{ flex:1; background:var(--panel-2); border-radius:6px; height:14px; overflow:hidden; }}
+  .barra-relleno {{ background:var(--lime); height:100%; border-radius:6px; }}
+  .barra-valor {{ width:28px; text-align:right; font-size:13px; color:var(--lime); font-weight:600; }}
+
+  section {{ margin-top:16px; }}
 </style>
 </head>
 <body>
-  <h1>Du Academy — Dashboard</h1>
-
-  <div class="grid">
-    <div class="tarjeta"><div class="num">{len(asesoras)}</div><div class="lbl">Asesoras registradas</div></div>
-    <div class="tarjeta"><div class="num">{len(historial)}</div><div class="lbl">Preguntas al bot (últimas 500)</div></div>
-    <div class="tarjeta"><div class="num">{total_enviadas_hoy}</div><div class="lbl">Píldoras enviadas hoy</div></div>
-    <div class="tarjeta"><div class="num">{tasa_aplicacion}%</div><div class="lbl">Tasa "lo aplicaré" hoy</div></div>
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Du Academy <span class="sub">Panel de control</span></div>
+    <div class="profile"><div class="avatar">D</div> Duvan Ramos</div>
   </div>
 
-  <h2>Actividad del bot conversacional (por asesora)</h2>
-  {filas_actividad}
+  <main>
+    <div class="header-row">
+      <h1>Resumen general</h1>
+      <div class="fecha">{hoy_legible}</div>
+    </div>
 
-  <h2>Preguntas recientes</h2>
-  <table>
-    <tr><th>Asesora</th><th>Pregunta</th><th>Fecha</th></tr>
-    {filas_recientes}
-  </table>
+    <div class="kpi-grid">
+      <div class="kpi hero">
+        <div class="kpi-top"><div class="kpi-icon">👥</div></div>
+        <div class="kpi-label">Asesoras registradas</div>
+        <div class="kpi-value">{len(asesoras)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><div class="kpi-icon">💬</div>{badge_mensajes}</div>
+        <div class="kpi-label">Preguntas al bot hoy</div>
+        <div class="kpi-value">{mensajes_hoy}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><div class="kpi-icon">🎓</div>{badge_pildoras}</div>
+        <div class="kpi-label">Píldoras enviadas hoy</div>
+        <div class="kpi-value">{total_enviadas_hoy}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><div class="kpi-icon">📋</div></div>
+        <div class="kpi-label">Auditorías totales</div>
+        <div class="kpi-value">{len(auditorias)}</div>
+      </div>
+    </div>
 
-  <h2>Auditorías consolidadas — por estado</h2>
-  {filas_estados}
+    <div class="panel-grid">
+      <div class="panel">
+        <h2>Actividad por asesora</h2>
+        <div class="subtitulo">Preguntas hechas al bot (top 10)</div>
+        <canvas id="graficoActividad" height="220"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Tasa "lo aplicaré"</h2>
+        <div class="subtitulo">Píldoras de hoy</div>
+        <div class="gauge-wrap">
+          <canvas id="graficoGauge" width="220" height="140"></canvas>
+          <div class="gauge-num">{tasa_aplicacion}%</div>
+          <div class="gauge-lbl">de compromiso</div>
+          <div class="gauge-sub">
+            <div><div class="n">{total_enviadas_hoy}</div><div class="l">Enviadas</div></div>
+            <div><div class="n">{total_aplicaron_hoy}</div><div class="l">Aplicarán</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-  <h2>Píldoras enviadas hoy — detalle por área</h2>
-  <table>
-    <tr><th>Área</th><th>Categoría</th><th>Enviadas</th><th>Aplicarán</th></tr>
-    {filas_pildoras}
-  </table>
+    <section class="panel">
+      <h2>Preguntas recientes</h2>
+      <div class="subtitulo">Últimas 20 preguntas al bot conversacional</div>
+      <table>
+        <tr><th>Asesora</th><th>Pregunta</th><th>Fecha</th></tr>
+        {filas_recientes}
+      </table>
+    </section>
 
-  <h2>Consultas de métricas (por asesora)</h2>
-  {filas_metricas}
+    <div class="panel-grid">
+      <section class="panel">
+        <h2>Auditorías consolidadas</h2>
+        <div class="subtitulo">Distribución por estado</div>
+        {filas_estados}
+      </section>
+      <section class="panel">
+        <h2>Consultas de métricas</h2>
+        <div class="subtitulo">Por asesora</div>
+        {filas_metricas}
+      </section>
+    </div>
 
+    <section class="panel">
+      <h2>Píldoras enviadas hoy</h2>
+      <div class="subtitulo">Detalle por área</div>
+      <table>
+        <tr><th>Área</th><th>Categoría</th><th>Enviadas</th><th>Aplicarán</th></tr>
+        {filas_pildoras}
+      </table>
+    </section>
+  </main>
+
+  <script>
+    Chart.defaults.color = '#9a9a9f';
+    Chart.defaults.font.family = "-apple-system, Arial, sans-serif";
+
+    new Chart(document.getElementById('graficoActividad'), {{
+      type: 'bar',
+      data: {{
+        labels: {labels_actividad},
+        datasets: [{{ data: {valores_actividad}, backgroundColor: '#a4d65e', borderRadius: 6, maxBarThickness: 34 }}]
+      }},
+      options: {{
+        plugins: {{ legend: {{ display:false }} }},
+        scales: {{
+          x: {{ grid: {{ display:false }} }},
+          y: {{ grid: {{ color:'#2a2a2e' }}, beginAtZero:true, ticks: {{ precision:0 }} }}
+        }}
+      }}
+    }});
+
+    new Chart(document.getElementById('graficoGauge'), {{
+      type: 'doughnut',
+      data: {{
+        datasets: [{{
+          data: [{tasa_aplicacion}, {100 - tasa_aplicacion}],
+          backgroundColor: ['#a4d65e', '#2a2a2e'],
+          borderWidth: 0,
+        }}]
+      }},
+      options: {{
+        rotation: -90, circumference: 180, cutout: '75%',
+        plugins: {{ legend: {{ display:false }}, tooltip: {{ enabled:false }} }}
+      }}
+    }});
+  </script>
 </body>
 </html>"""
 
