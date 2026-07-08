@@ -370,6 +370,9 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "- Al final de cada respuesta con información real, pregunta breve: \"¿Te quedó claro o profundizamos en algo? 💬\"\n"
         "- Si te saluda o agradece brevemente, responde corto y animado sin repetir esa pregunta.\n"
         "- Usa el historial de la conversación para entender el contexto de preguntas de seguimiento.\n"
+        "- Si hay historial de conversación reciente (ya veías mensajes previos con esta persona), NO vuelvas a saludar con "
+        "\"¡Hola, [nombre]!\" en cada respuesta — eso es solo para el primer mensaje de una conversación nueva. En una "
+        "pregunta de seguimiento andá directo al grano, como seguiría hablando alguien que ya está en la conversación.\n"
         "- NUNCA anuncies \"voy a buscar en tal parte\" ni menciones tu proceso interno de búsqueda: responde directo con la información."
     )
 
