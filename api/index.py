@@ -32,6 +32,7 @@ AC_TEMPLATE_LANG = os.environ.get("AC_TEMPLATE_LANG", "es_CO")
 PDF_SERVICE_URL = os.environ.get("PDF_SERVICE_URL", "")
 PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -122,6 +123,15 @@ def _ok():
 
 
 async def procesar_flujo_bot(numero: str, texto: str):
+    if ADMIN_NUMERO and numero == ADMIN_NUMERO and texto.strip().lower().startswith("#nueva"):
+        contenido = texto.strip()[len("#nueva"):].strip()
+        if contenido:
+            await guardar_conocimiento_extra(contenido)
+            await despachar_mensaje_whatsapp(numero, f"✅ Guardado en la base de conocimiento:\n\n_{contenido}_")
+        else:
+            await despachar_mensaje_whatsapp(numero, "Escribí *#nueva* seguido del contenido a guardar. Ej: `#nueva el horario de atención cambió a partir de agosto`")
+        return
+
     if await procesar_compromiso_consolidado(numero, texto):
         return
     if await guardar_compromiso_auditoria(numero, texto):
@@ -284,6 +294,28 @@ async def buscar_tarifas(pregunta: str):
     return [f for _, f in relevantes[:8]]
 
 
+async def guardar_conocimiento_extra(contenido: str):
+    await _sb_post("conocimiento_extra", {"contenido": contenido})
+
+
+async def buscar_conocimiento_extra(pregunta: str):
+    palabras_pregunta = _normalizar(pregunta)
+    if not palabras_pregunta:
+        return []
+
+    filas = await _sb_get("conocimiento_extra", {"select": "contenido"})
+
+    relevantes = []
+    for f in filas:
+        palabras_contenido = _normalizar(f["contenido"])
+        coincidencias = len(palabras_pregunta & palabras_contenido)
+        if coincidencias > 0:
+            relevantes.append((coincidencias, f["contenido"]))
+
+    relevantes.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in relevantes[:5]]
+
+
 # ============================================================
 # CEREBRO DE DU — 1 sola llamada a Gemini con prioridad de fuentes + memoria
 # ============================================================
@@ -291,6 +323,7 @@ async def buscar_tarifas(pregunta: str):
 async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: str) -> str:
     historial = await obtener_historial(numero)
     archivos_parts = await obtener_manuales(mensaje_usuario)
+    conocimiento_extra = await buscar_conocimiento_extra(mensaje_usuario)
     tarifas_encontradas = await buscar_tarifas(mensaje_usuario)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -311,14 +344,16 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "1. Si la pregunta es sobre tarifas o precios de un servicio, y te paso un bloque \"TARIFAS ENCONTRADAS\" junto con "
         "el mensaje, esa es la fuente autoritativa y exacta — respondé con eso, no busques en otro lado. Si el bloque viene "
         "vacío o no trae el servicio/categoría exacta que preguntan, decilo honestamente en vez de inventar un precio.\n"
-        "2. Para todo lo demás, revisa primero los documentos PDF adjuntos (manuales internos oficiales). Si el dato está "
+        "2. Si te paso un bloque \"AVISOS INTERNOS\" junto con el mensaje, y tiene relación con la pregunta, esa es "
+        "información reciente cargada directamente por el coordinador — priorizala sobre los PDFs y la web si aplica.\n"
+        "3. Para todo lo demás, revisa primero los documentos PDF adjuntos (manuales internos oficiales). Si el dato está "
         "ahí, respóndelo basado en eso.\n"
-        "3. Si no está en los documentos, usa la búsqueda web pero confía SOLO en resultados de cofrem.com.co.\n"
-        "4. Si tampoco encuentras nada ahí, podés buscar en la web general, pero SIEMPRE específicamente sobre COFREM "
+        "4. Si no está en los documentos, usa la búsqueda web pero confía SOLO en resultados de cofrem.com.co.\n"
+        "5. Si tampoco encuentras nada ahí, podés buscar en la web general, pero SIEMPRE específicamente sobre COFREM "
         "(nunca sobre otras cajas de compensación como Comfama, Compensar, Cafam, Colsubsidio, etc. — aunque el trámite o "
         "tema exista en cualquier caja, la respuesta tiene que ser la versión y las reglas propias de Cofrem, nunca la de otra "
         "caja aunque parezca aplicar igual). Aclará en tu respuesta que es información general no oficial y que debe validarse.\n"
-        "5. Si de verdad no encontrás nada sobre Cofrem en ninguna fuente, decilo honestamente: no inventes, no asumas, y "
+        "6. Si de verdad no encontrás nada sobre Cofrem en ninguna fuente, decilo honestamente: no inventes, no asumas, y "
         "nunca completes con información de otra caja de compensación aunque sea parecida.\n\n"
         "RECENCIA DE FUENTES WEB (aplica a los pasos 3 y 4, cuando buscás fuera de los PDF adjuntos):\n"
         "Preferí siempre resultados de 2025 o 2026. Si la fuente más confiable que encontrás es más vieja (2024, 2023 o "
@@ -344,9 +379,15 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
     else:
         texto_tarifas = ""
 
+    if conocimiento_extra:
+        lineas_avisos = "\n".join(f"- {c}" for c in conocimiento_extra)
+        texto_avisos = f"\n\nAVISOS INTERNOS:\n{lineas_avisos}"
+    else:
+        texto_avisos = ""
+
     contenido_historial = [{"role": h["rol"], "parts": [{"text": h["texto"]}]} for h in historial]
     contents = contenido_historial + [
-        {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_tarifas}]}
+        {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_tarifas + texto_avisos}]}
     ]
 
     payload = {
