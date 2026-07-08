@@ -1036,11 +1036,53 @@ async def procesar_respuesta_metricas(numero: str, texto: str) -> bool:
         return True
 
     fecha = metricas[0].get("fecha") or ""
-    lineas = "\n".join(f"- {m['metrica']}: {m['valor']}" for m in metricas)
-    mensaje = (
-        f"📊 *Tus métricas, {asesora['nombre']}*"
-        + (f" ({fecha})" if fecha else "")
-        + f"\n\n{lineas}\n\n¡Sigue así! 💪"
-    )
-    await despachar_mensaje_whatsapp(numero, mensaje)
+    lineas = "\n".join(f"{m['metrica']}: {m['valor']}" for m in metricas)
+
+    imagen_url = await solicitar_imagen_metricas(asesora["nombre"], lineas, fecha)
+    if imagen_url:
+        await enviar_imagen_whatsapp(numero, imagen_url, "¡Sigue así! 💪")
+    else:
+        mensaje = (
+            f"📊 *Tus métricas, {asesora['nombre']}*"
+            + (f" ({fecha})" if fecha else "")
+            + f"\n\n{lineas}\n\n¡Sigue así! 💪"
+        )
+        await despachar_mensaje_whatsapp(numero, mensaje)
     return True
+
+
+async def solicitar_imagen_metricas(nombre: str, metricas_texto: str, fecha: str):
+    if not PDF_SERVICE_URL:
+        return None
+    payload = {
+        "secret": PDF_SERVICE_SECRET,
+        "accion": "imagen_metricas",
+        "nombre": nombre,
+        "metricas": metricas_texto,
+        "fecha": fecha,
+    }
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            res = await client.post(PDF_SERVICE_URL, json=payload, timeout=45.0)
+            if res.status_code != 200:
+                print(f"❌ Error generando imagen de métricas: [{res.status_code}] {res.text}")
+                return None
+            return res.json().get("url")
+        except Exception as e:
+            print(f"❌ Error llamando al servicio de imagen: {e}")
+            return None
+
+
+async def enviar_imagen_whatsapp(numero: str, image_url: str, caption: str = ""):
+    url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "image",
+        "image": {"link": image_url, "caption": caption},
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando imagen: [{res.status_code}] {res.text}")
