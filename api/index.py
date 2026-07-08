@@ -1,9 +1,10 @@
 import os
 import re
 import time
+import json
 import random
 import unicodedata
-from datetime import date
+from datetime import date, datetime, timezone
 import httpx
 from fastapi import FastAPI, Request, Response
 
@@ -20,6 +21,7 @@ PD_TEMPLATE_NAME = os.environ.get("PD_TEMPLATE_NAME", "pildora_diaria")
 PD_TEMPLATE_LANG = os.environ.get("PD_TEMPLATE_LANG", "es_CO")
 PD_IMAGEN_URL = os.environ.get("PD_IMAGEN_URL", "")
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+AUDITORIA_SECRET = os.environ.get("AUDITORIA_SECRET", "")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -82,6 +84,8 @@ async def recibir_mensaje(request: Request):
                 button_id = interactive.get("button_reply", {}).get("id", "")
                 if button_id == "pildora_aplicare":
                     await registrar_aplicare(numero)
+                elif button_id == "btn_recibida":
+                    await marcar_recibida_auditoria(numero)
 
     except Exception as e:
         print(f"❌ Error controlado en recibir_mensaje: {e}")
@@ -101,6 +105,9 @@ def _ok():
 
 
 async def procesar_flujo_bot(numero: str, texto: str):
+    if await guardar_compromiso_auditoria(numero, texto):
+        return
+
     nombre_asesora = await buscar_asesora(numero)
     if not nombre_asesora:
         respuesta = await gestionar_nuevo_usuario(numero, texto)
@@ -642,3 +649,124 @@ async def cron_pildoras(request: Request):
         return Response(content="Forbidden", status_code=403)
     await enviar_pildora_del_dia()
     return _ok()
+
+
+# ============================================================
+# AUDITORÍAS — envío por WhatsApp, botón "Recibida" y compromiso
+# ============================================================
+
+async def enviar_auditoria(numero: str, nombre_asesora: str, nota: int, hallazgos: list, puntos_mejora: list) -> bool:
+    cuerpo = f"*🎯 AUDITORIA - {nombre_asesora}*\n\n"
+    cuerpo += f"*📊 Nota: {nota}/100*\n\n"
+
+    cuerpo += "*📌 Hallazgos:*\n"
+    if hallazgos:
+        for h in hallazgos:
+            cuerpo += f"• {h}\n"
+    else:
+        cuerpo += "• Ninguno - ¡Excelente desempeño!\n"
+
+    cuerpo += "\n*⚡ Puntos de Mejora:*\n"
+    if puntos_mejora:
+        for p in puntos_mejora:
+            cuerpo += f"• {p}\n"
+    else:
+        cuerpo += "• Mantén el estándar actual\n"
+
+    cuerpo += "\n_¿Recibiste la auditoría?_"
+
+    url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": numero,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": cuerpo},
+            "action": {"buttons": [{"type": "reply", "reply": {"id": "btn_recibida", "title": "✅ Recibida"}}]},
+        },
+    }
+
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando auditoría a {numero}: [{res.status_code}] {res.text}")
+            return False
+        message_id = res.json().get("messages", [{}])[0].get("id")
+
+    await _sb_post("auditorias", {
+        "numero": numero,
+        "nombre_asesora": nombre_asesora,
+        "hallazgos": " | ".join(hallazgos),
+        "puntos_mejora": " | ".join(puntos_mejora),
+        "nota": nota,
+        "estado": "Enviada",
+        "message_id": message_id,
+    })
+    return True
+
+
+async def marcar_recibida_auditoria(numero: str):
+    filas = await _sb_get("auditorias", {
+        "numero": f"eq.{numero}", "estado": "eq.Enviada",
+        "select": "id", "order": "created_at.desc", "limit": "1",
+    })
+    if not filas:
+        return
+
+    await _sb_patch("auditorias", {"id": f"eq.{filas[0]['id']}"}, {"estado": "Recibida"})
+
+    mensaje = (
+        "Gracias por confirmar 👋\n\n"
+        "Ahora, por favor escribe el *COMPROMISO DE MEJORA* que te comprometes a cumplir basado en esta auditoría.\n\n"
+        "_(Ejemplo: Mejorar el tiempo de respuesta en los primeros 30 segundos de cada llamada)_"
+    )
+    await despachar_mensaje_whatsapp(numero, mensaje)
+
+
+async def guardar_compromiso_auditoria(numero: str, texto: str) -> bool:
+    filas = await _sb_get("auditorias", {
+        "numero": f"eq.{numero}", "estado": "eq.Recibida",
+        "select": "id", "order": "created_at.desc", "limit": "1",
+    })
+    if not filas:
+        return False
+
+    await _sb_patch("auditorias", {"id": f"eq.{filas[0]['id']}"}, {
+        "estado": "Comprometida",
+        "compromiso": texto,
+        "fecha_compromiso": _ahora_iso(),
+    })
+
+    mensaje = (
+        f"✅ *Compromiso registrado:*\n\n\"_{texto}_\"\n\n"
+        "Quedará pendiente de cumplimiento en los próximos 30 días.\n\n"
+        "¡Éxito en tu mejora continua! 💪"
+    )
+    await despachar_mensaje_whatsapp(numero, mensaje)
+    return True
+
+
+def _ahora_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/api/enviar-auditoria")
+async def api_enviar_auditoria(request: Request):
+    if not AUDITORIA_SECRET or request.headers.get("authorization") != f"Bearer {AUDITORIA_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+
+    body = await request.json()
+    numero = str(body.get("numero", "")).strip()
+    nombre = str(body.get("nombre", "")).strip()
+    nota = int(body.get("nota", 0))
+    hallazgos = body.get("hallazgos", [])
+    puntos_mejora = body.get("puntosMejora", [])
+
+    if not numero or not nombre:
+        return Response(content=json.dumps({"error": "numero y nombre requeridos"}), status_code=400, media_type="application/json")
+
+    ok = await enviar_auditoria(numero, nombre, nota, hallazgos, puntos_mejora)
+    return Response(content=json.dumps({"ok": ok}), media_type="application/json")
