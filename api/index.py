@@ -722,6 +722,56 @@ async def cron_pildoras(request: Request):
 
 
 # ============================================================
+# CHEQUEO DE SALUD DIARIO — avisa por WhatsApp si algo se rompió
+# ============================================================
+
+@app.get("/api/cron-healthcheck")
+async def cron_healthcheck(request: Request):
+    if CRON_SECRET and request.headers.get("authorization") != f"Bearer {CRON_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+
+    problemas = []
+
+    # 1. WhatsApp: el token y el numero siguen respondiendo
+    try:
+        url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}?fields=verified_name"
+        headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            problemas.append(f"WhatsApp: token o número con error [{res.status_code}] {res.text[:150]}")
+    except Exception as e:
+        problemas.append(f"WhatsApp: excepción al verificar ({e})")
+
+    # 2. Gemini: al menos un modelo de la cadena de respaldo debe responder
+    texto, modelo_usado = await _llamar_gemini(
+        contents=[{"role": "user", "parts": [{"text": "responde solo con OK"}]}],
+        system_instruction="Responde solo con la palabra OK, nada más.",
+        tools=None,
+        temperatura=0.0,
+        max_tokens=10,
+    )
+    if not texto:
+        problemas.append("Gemini: ningún modelo de la cadena de respaldo respondió (todos caídos)")
+    elif modelo_usado != GEMINI_MODELS_FALLBACK[0]:
+        problemas.append(
+            f"Gemini: el modelo principal ({GEMINI_MODELS_FALLBACK[0]}) sigue sin responder, "
+            f"usando respaldo ({modelo_usado}) — el bot funciona pero más lento"
+        )
+
+    if problemas and ADMIN_NUMERO:
+        mensaje = "🚨 *Chequeo diario del bot* — se encontraron problemas:\n\n" + "\n".join(f"- {p}" for p in problemas)
+        await despachar_mensaje_whatsapp(ADMIN_NUMERO, mensaje)
+
+    if problemas:
+        print(f"⚠️ Healthcheck con problemas: {problemas}")
+    else:
+        print("✅ Healthcheck OK")
+
+    return Response(content=json.dumps({"ok": not problemas, "problemas": problemas}), media_type="application/json")
+
+
+# ============================================================
 # AUDITORÍAS — envío por WhatsApp, botón "Recibida" y compromiso
 # ============================================================
 
