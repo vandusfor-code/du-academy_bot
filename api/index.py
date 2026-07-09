@@ -749,7 +749,7 @@ async def cron_healthcheck(request: Request):
         system_instruction="Responde solo con la palabra OK, nada más.",
         tools=None,
         temperatura=0.0,
-        max_tokens=10,
+        max_tokens=100,
     )
     if not texto:
         problemas.append("Gemini: ningún modelo de la cadena de respaldo respondió (todos caídos)")
