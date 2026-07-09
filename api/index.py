@@ -35,16 +35,45 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 
 WA_API_VERSION = "v20.0"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODELS_FALLBACK = [
+    m.strip() for m in os.environ.get(
+        "GEMINI_MODELS_FALLBACK", "gemini-flash-latest,gemini-pro-latest"
+    ).split(",") if m.strip()
+]
 
 
-def _generation_config(temperatura: float, max_tokens: int) -> dict:
-    config = {"temperature": temperatura, "maxOutputTokens": max_tokens}
-    # Los modelos "pro" no permiten desactivar el modo pensamiento (thinkingBudget 0),
-    # solo los "flash" lo soportan. Se omite en pro para no romper la llamada.
-    if "flash" in GEMINI_MODEL.lower():
-        config["thinkingConfig"] = {"thinkingBudget": 0}
-    return config
+async def _llamar_gemini(contents: list, system_instruction: str, tools: list, temperatura: float, max_tokens: int):
+    """Prueba cada modelo de GEMINI_MODELS_FALLBACK en orden hasta que uno responda.
+    Devuelve (texto, modelo_usado) o (None, None) si todos fallan."""
+    payload_base = {"contents": contents, "systemInstruction": {"parts": [{"text": system_instruction}]}}
+    if tools:
+        payload_base["tools"] = tools
+
+    async with httpx.AsyncClient() as client:
+        for modelo in GEMINI_MODELS_FALLBACK:
+            config = {"temperature": temperatura, "maxOutputTokens": max_tokens}
+            # Los modelos "pro" no permiten desactivar el modo pensamiento (thinkingBudget 0),
+            # solo los "flash" lo soportan.
+            if "flash" in modelo.lower():
+                config["thinkingConfig"] = {"thinkingBudget": 0}
+            payload = {**payload_base, "generationConfig": config}
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                res = await client.post(url, json=payload, timeout=45.0)
+                if res.status_code == 200:
+                    data = res.json()
+                    candidates = data.get("candidates")
+                    if candidates and candidates[0].get("content", {}).get("parts"):
+                        texto = candidates[0]["content"]["parts"][0].get("text", "")
+                        if texto:
+                            return texto, modelo
+                    print(f"⚠️ {modelo} respondió 200 sin texto útil, probando siguiente modelo")
+                    continue
+                print(f"⚠️ {modelo} falló [{res.status_code}], probando siguiente modelo: {res.text[:200]}")
+            except Exception as e:
+                print(f"⚠️ {modelo} lanzó excepción, probando siguiente modelo: {e}")
+    return None, None
+
 
 SUPABASE_HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -335,8 +364,6 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
     conocimiento_extra = await buscar_conocimiento_extra(mensaje_usuario)
     tarifas_encontradas = await buscar_tarifas(mensaje_usuario)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-
     system_instruction = (
         "Tu nombre es Du. Eres el compañero de trabajo virtual de las asesoras de COFREM en People BPO, "
         "ayudándolas en tiempo real mientras atienden llamadas o chats.\n\n"
@@ -402,32 +429,19 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_tarifas + texto_avisos}]}
     ]
 
-    payload = {
-        "contents": contents,
-        "systemInstruction": {"parts": [{"text": system_instruction}]},
-        "tools": [{"google_search": {}}],
-        "generationConfig": _generation_config(0.4, 1024),
-    }
+    texto_respuesta, modelo_usado = await _llamar_gemini(
+        contents=contents,
+        system_instruction=system_instruction,
+        tools=[{"google_search": {}}],
+        temperatura=0.4,
+        max_tokens=1024,
+    )
 
-    async with httpx.AsyncClient() as client:
-        try:
-            res = await client.post(url, json=payload, timeout=45.0)
-            if res.status_code != 200:
-                print(f"❌ Error Gemini: {res.text}")
-                return f"Oye {nombre_asesora}, tuve un problema procesando tu consulta. ¿Puedes intentar de nuevo? 🛠️✨"
+    if not texto_respuesta:
+        return f"Hola {nombre_asesora}. Tuve un contratiempo de conexión. Dame un minutito e intenta de nuevo. 🛠️✨"
 
-            data = res.json()
-            candidates = data.get("candidates")
-            if candidates and candidates[0].get("content", {}).get("parts"):
-                texto_respuesta = candidates[0]["content"]["parts"][0].get("text", "")
-            else:
-                texto_respuesta = f"Oye {nombre_asesora}, se me cortó la señal un segundo. ¿Me repites la pregunta? ⚡💜"
-
-            await guardar_historial(numero, mensaje_usuario, texto_respuesta)
-            return texto_respuesta
-        except Exception as e:
-            print(f"❌ Error en consultar_du_bot: {e}")
-            return f"Hola {nombre_asesora}. Tuve un contratiempo de conexión. Dame un minutito e intenta de nuevo. 🛠️✨"
+    await guardar_historial(numero, mensaje_usuario, texto_respuesta)
+    return texto_respuesta
 
 
 # ============================================================
@@ -563,26 +577,14 @@ async def generar_pildora_gemini(area: str, categoria: str, tipo_area: str):
         )
         user_prompt = f"Genera una píldora de \"{categoria}\" de motivación de vida, teniendo en cuenta que hoy es {dia_actual}."
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "generationConfig": _generation_config(0.8, 300),
-    }
-    async with httpx.AsyncClient() as client:
-        try:
-            res = await client.post(url, json=payload, timeout=30.0)
-            if res.status_code != 200:
-                print(f"❌ Error Gemini píldora: {res.text}")
-                return None
-            data = res.json()
-            candidates = data.get("candidates")
-            if candidates and candidates[0].get("content", {}).get("parts"):
-                return candidates[0]["content"]["parts"][0].get("text", "").strip()
-            return None
-        except Exception as e:
-            print(f"❌ Error generando píldora: {e}")
-            return None
+    texto, modelo_usado = await _llamar_gemini(
+        contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+        system_instruction=system_prompt,
+        tools=None,
+        temperatura=0.8,
+        max_tokens=300,
+    )
+    return texto.strip() if texto else None
 
 
 async def enviar_plantilla_pildora(numero: str, pildora: str, categoria: str, area: str) -> bool:
