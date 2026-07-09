@@ -37,6 +37,15 @@ ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 WA_API_VERSION = "v20.0"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
+
+def _generation_config(temperatura: float, max_tokens: int) -> dict:
+    config = {"temperature": temperatura, "maxOutputTokens": max_tokens}
+    # Los modelos "pro" no permiten desactivar el modo pensamiento (thinkingBudget 0),
+    # solo los "flash" lo soportan. Se omite en pro para no romper la llamada.
+    if "flash" in GEMINI_MODEL.lower():
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+    return config
+
 SUPABASE_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -397,11 +406,7 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "contents": contents,
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "tools": [{"google_search": {}}],
-        "generationConfig": {
-            "temperature": 0.4,
-            "maxOutputTokens": 1024,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "generationConfig": _generation_config(0.4, 1024),
     }
 
     async with httpx.AsyncClient() as client:
@@ -562,11 +567,7 @@ async def generar_pildora_gemini(area: str, categoria: str, tipo_area: str):
     payload = {
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "generationConfig": {
-            "temperature": 0.8,
-            "maxOutputTokens": 300,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "generationConfig": _generation_config(0.8, 300),
     }
     async with httpx.AsyncClient() as client:
         try:
