@@ -1041,14 +1041,28 @@ def _formatear_fecha_co(iso_str: str) -> str:
 # MÉTRICAS EN TIEMPO REAL — consulta con verificación de contraseña
 # ============================================================
 
-PALABRAS_METRICAS = {
-    "metrica", "metricas", "bono", "adherencia", "productividad", "satisfaccion",
-    "desempeno", "calificacion", "calificaciones", "resultados", "pec", "penc",
-}
+PATRONES_METRICAS = [
+    re.compile(r"\bmis?\s+metricas?\b"),
+    re.compile(r"\bcomo\s+voy\b"),
+    re.compile(r"\bmi\s+bono\b"),
+    re.compile(r"\bmi\s+desempen\w*\b"),
+    re.compile(r"\bmi\s+calificacion\b"),
+    re.compile(r"\bmis\s+resultados\b"),
+    re.compile(r"\bmi\s+productividad\b"),
+    re.compile(r"\bmi\s+adherencia\b"),
+    re.compile(r"\bmi\s+pec\b"),
+    re.compile(r"\bmi\s+penc\b"),
+]
+
+
+def _texto_normalizado_plano(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    return "".join(c for c in texto if not unicodedata.combining(c))
 
 
 def _es_pregunta_metricas(texto: str) -> bool:
-    return bool(_normalizar(texto) & PALABRAS_METRICAS)
+    plano = _texto_normalizado_plano(texto)
+    return any(p.search(plano) for p in PATRONES_METRICAS)
 
 
 async def iniciar_solicitud_metricas(numero: str) -> str:
@@ -1063,13 +1077,23 @@ async def procesar_respuesta_metricas(numero: str, texto: str) -> bool:
     if not pendientes:
         return False
 
+    texto_limpio = texto.strip()
+    parece_password = (
+        0 < len(texto_limpio) <= 20 and " " not in texto_limpio and "?" not in texto_limpio
+    )
+    if not parece_password:
+        # No parece un intento de contraseña (es una pregunta normal, con espacios/signos) —
+        # cancelamos el pedido pendiente en vez de bloquear la conversación para siempre.
+        await _sb_delete("metricas_pendientes", {"numero": f"eq.{numero}"})
+        return False
+
     filas = await _sb_get("asesoras", {"numero": f"eq.{numero}", "select": "nombre,usuario,contrasena"})
     if not filas:
         return False
     asesora = filas[0]
 
-    if not asesora.get("contrasena") or texto.strip() != asesora["contrasena"]:
-        await despachar_mensaje_whatsapp(numero, "Esa contraseña no es correcta 🙈 Intenta de nuevo.")
+    if not asesora.get("contrasena") or texto_limpio != asesora["contrasena"]:
+        await despachar_mensaje_whatsapp(numero, "Esa contraseña no es correcta 🙈 Intenta de nuevo, o seguí preguntando normal si te equivocaste de comando.")
         return True
 
     await _sb_delete("metricas_pendientes", {"numero": f"eq.{numero}"})
