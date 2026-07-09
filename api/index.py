@@ -35,7 +35,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 
 WA_API_VERSION = "v20.0"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
 SUPABASE_HEADERS = {
     "apikey": SUPABASE_KEY,
