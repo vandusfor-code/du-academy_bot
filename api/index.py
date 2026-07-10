@@ -176,7 +176,8 @@ async def procesar_flujo_bot(numero: str, texto: str, msg_id: str = None):
         contenido = texto.strip()[len("#nueva"):].strip()
         if contenido:
             await guardar_conocimiento_extra(contenido)
-            await despachar_mensaje_whatsapp(numero, f"✅ Guardado en la base de conocimiento:\n\n_{contenido}_")
+            avance = contenido if len(contenido) <= 300 else contenido[:300].rstrip() + "…"
+            await despachar_mensaje_whatsapp(numero, f"✅ Guardado en la base de conocimiento:\n\n_{avance}_")
         else:
             await despachar_mensaje_whatsapp(numero, "Escribí *#nueva* seguido del contenido a guardar. Ej: `#nueva el horario de atención cambió a partir de agosto`")
         return
@@ -487,6 +488,8 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
 # ============================================================
 
 async def despachar_mensaje_whatsapp(numero: str, texto: str):
+    if len(texto) > 4096:
+        texto = texto[:4090].rstrip() + "…"
     url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {"messaging_product": "whatsapp", "to": numero, "type": "text", "text": {"body": texto}}
