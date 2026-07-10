@@ -726,11 +726,17 @@ async def enviar_pildora_del_dia():
         print("⚠️ No hay asesoras con área asignada")
         return
 
+    ya_enviadas_hoy = await _sb_get("pildoras_enviadas", {"fecha": f"eq.{hoy.isoformat()}", "select": "area"})
+    areas_ya_enviadas = {fila["area"] for fila in ya_enviadas_hoy}
+
     grupos = {}
     for a in asesoras:
         grupos.setdefault(a["area"], []).append(a)
 
     for area, lista in grupos.items():
+        if area in areas_ya_enviadas:
+            print(f"⏭️ Ya se envió la píldora de hoy para {area}, se omite (evita duplicados por reintento)")
+            continue
         tipo_area = identificar_tipo_area(area)
         categoria = seleccionar_categoria(tipo_area)
         pildora = await generar_pildora_gemini(area, categoria, tipo_area)
