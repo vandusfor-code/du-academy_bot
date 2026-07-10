@@ -620,7 +620,7 @@ async def generar_pildora_gemini(area: str, categoria: str, tipo_area: str):
         system_instruction=system_prompt,
         tools=None,
         temperatura=0.8,
-        max_tokens=300,
+        max_tokens=1024,
     )
     return texto.strip() if texto else None
 
