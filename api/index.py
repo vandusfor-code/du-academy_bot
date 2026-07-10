@@ -65,6 +65,10 @@ async def _llamar_gemini(contents: list, system_instruction: str, tools: list, t
                     candidates = data.get("candidates")
                     if candidates and candidates[0].get("content", {}).get("parts"):
                         texto = candidates[0]["content"]["parts"][0].get("text", "")
+                        finish_reason = candidates[0].get("finishReason")
+                        if texto and finish_reason == "MAX_TOKENS":
+                            print(f"⚠️ {modelo} cortó la respuesta por límite de tokens (texto incompleto), probando siguiente modelo")
+                            continue
                         if texto:
                             return texto, modelo
                     print(f"⚠️ {modelo} respondió 200 sin texto útil, probando siguiente modelo")
