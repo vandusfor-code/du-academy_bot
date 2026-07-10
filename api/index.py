@@ -118,7 +118,7 @@ async def recibir_mensaje(request: Request):
             numero = str(msg.get("from")).strip()
             texto_usuario = (msg.get("text", {}).get("body") or "").strip()
             if texto_usuario:
-                await procesar_flujo_bot(numero, texto_usuario)
+                await procesar_flujo_bot(numero, texto_usuario, msg_id)
 
         elif msg.get("type") == "button":
             numero = str(msg.get("from")).strip()
@@ -160,7 +160,7 @@ def _ok():
     return Response(content='{"status":"success"}', media_type="application/json")
 
 
-async def procesar_flujo_bot(numero: str, texto: str):
+async def procesar_flujo_bot(numero: str, texto: str, msg_id: str = None):
     if ADMIN_NUMERO and numero == ADMIN_NUMERO and texto.strip().lower().startswith("#nueva"):
         contenido = texto.strip()[len("#nueva"):].strip()
         if contenido:
@@ -183,7 +183,7 @@ async def procesar_flujo_bot(numero: str, texto: str):
     elif _es_pregunta_metricas(texto):
         respuesta = await iniciar_solicitud_metricas(numero)
     else:
-        await marcar_escribiendo_whatsapp(numero)
+        await marcar_escribiendo_whatsapp(numero, msg_id)
         respuesta = await consultar_du_bot(texto, nombre_asesora, numero)
     await despachar_mensaje_whatsapp(numero, respuesta)
 
@@ -482,17 +482,21 @@ async def despachar_mensaje_whatsapp(numero: str, texto: str):
             print(f"❌ Error enviando mensaje: [{res.status_code}] {res.text}")
 
 
-async def marcar_escribiendo_whatsapp(numero: str):
+async def marcar_escribiendo_whatsapp(numero: str, msg_id: str = None):
+    if not msg_id:
+        return
     url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": numero,
-        "sender_action": "typing_on",
+        "status": "read",
+        "message_id": msg_id,
+        "typing_indicator": {"type": "text"},
     }
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload, headers=headers, timeout=10.0)
+        res = await client.post(url, json=payload, headers=headers, timeout=10.0)
+        if res.status_code != 200:
+            print(f"❌ Error marcando escribiendo/leído: [{res.status_code}] {res.text}")
 
 
 # ============================================================
