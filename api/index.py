@@ -245,7 +245,7 @@ async def _extraer_nombre(texto: str):
         ),
         tools=None,
         temperatura=0.0,
-        max_tokens=30,
+        max_tokens=100,
     )
     if not extraido or extraido.strip() == "SIN_NOMBRE":
         return None
