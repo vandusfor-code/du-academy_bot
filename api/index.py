@@ -231,10 +231,34 @@ async def buscar_asesora(numero: str):
     return filas[0]["nombre"] if filas else None
 
 
+async def _extraer_nombre(texto: str):
+    """Extrae el nombre real de la respuesta del usuario, aunque venga como frase
+    completa ('me llamo Ana', 'soy Carlos Perez') y no solo el nombre suelto."""
+    extraido, _ = await _llamar_gemini(
+        contents=[{"role": "user", "parts": [{"text": texto}]}],
+        system_instruction=(
+            "El usuario te va a responder con su nombre, a veces como frase completa "
+            "(ej. 'me llamo Ana', 'soy Carlos Perez', 'mi nombre es X') y a veces solo el nombre suelto. "
+            "Respondé ÚNICAMENTE con el nombre completo de la persona, sin nada más, sin puntuación "
+            "extra, respetando mayúsculas. Si no podés identificar un nombre real en el texto, "
+            "respondé exactamente: SIN_NOMBRE"
+        ),
+        tools=None,
+        temperatura=0.0,
+        max_tokens=30,
+    )
+    if not extraido or extraido.strip() == "SIN_NOMBRE":
+        return None
+    return extraido.strip()
+
+
 async def gestionar_nuevo_usuario(numero: str, texto: str) -> str:
     pendientes = await _sb_get("registro_pendiente", {"numero": f"eq.{numero}", "select": "numero"})
     if pendientes:
-        nombre = texto.strip()
+        nombre = await _extraer_nombre(texto)
+        if not nombre:
+            return ("No logré identificar tu nombre en ese mensaje 🤔 ¿Me lo podés escribir de nuevo, "
+                    "solo tu nombre completo?")
         await _sb_post("asesoras", {"nombre": nombre, "numero": numero, "cargo": "Asesora Nueva"})
         await _sb_delete("registro_pendiente", {"numero": f"eq.{numero}"})
         return (f"¡Listo! Ya te registré en mis contactos como *{nombre}* ¡Qué alegría tenerte en el equipo! 🙌✨ "
