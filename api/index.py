@@ -94,6 +94,7 @@ def verificar_webhook(request: Request):
 @app.post("/api")
 @app.post("/webhook")
 async def recibir_mensaje(request: Request):
+    numero = None
     try:
         body = await request.json()
         entrada = _extraer_valor(body)
@@ -110,9 +111,8 @@ async def recibir_mensaje(request: Request):
         msg_id = msg.get("id")
 
         if msg_id:
-            if await ya_procesado(msg_id):
+            if not await marcar_procesado(msg_id):
                 return _ok()
-            await marcar_procesado(msg_id)
 
         if msg.get("type") == "text":
             numero = str(msg.get("from")).strip()
@@ -145,6 +145,13 @@ async def recibir_mensaje(request: Request):
 
     except Exception as e:
         print(f"❌ Error controlado en recibir_mensaje: {e}")
+        if numero:
+            try:
+                await despachar_mensaje_whatsapp(
+                    numero, "Tuve un contratiempo técnico procesando tu mensaje. Intenta de nuevo en un momento 🛠️"
+                )
+            except Exception as e2:
+                print(f"❌ Además falló el aviso de error al usuario: {e2}")
 
     return _ok()
 
@@ -286,13 +293,16 @@ async def guardar_historial(numero: str, pregunta: str, respuesta: str):
     ])
 
 
-async def ya_procesado(msg_id: str) -> bool:
-    filas = await _sb_get("mensajes_procesados", {"msg_id": f"eq.{msg_id}", "select": "msg_id"})
-    return len(filas) > 0
-
-
-async def marcar_procesado(msg_id: str):
-    await _sb_post("mensajes_procesados", {"msg_id": msg_id})
+async def marcar_procesado(msg_id: str) -> bool:
+    """Inserta msg_id de forma atomica (es primary key). Devuelve True si este request
+    "ganó" la carrera y debe procesar el mensaje; False si ya estaba procesado
+    (evita respuestas duplicadas cuando WhatsApp reentrega el mismo webhook)."""
+    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            f"{SUPABASE_URL}/rest/v1/mensajes_procesados", headers=headers, json={"msg_id": msg_id}, timeout=10.0
+        )
+        return res.status_code == 201
 
 
 STOPWORDS = {
