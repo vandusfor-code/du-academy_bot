@@ -52,10 +52,13 @@ async def _llamar_gemini(contents: list, system_instruction: str, tools: list, t
     async with httpx.AsyncClient() as client:
         for modelo in GEMINI_MODELS_FALLBACK:
             config = {"temperature": temperatura, "maxOutputTokens": max_tokens}
-            # Los modelos "pro" no permiten desactivar el modo pensamiento (thinkingBudget 0),
-            # solo los "flash" lo soportan.
+            # Los modelos "pro" no permiten desactivar el modo pensamiento, solo los "flash" lo soportan.
+            # Gemini 3.x reemplazo el parametro numerico thinkingBudget por el enum thinkingLevel.
             if "flash" in modelo.lower():
-                config["thinkingConfig"] = {"thinkingBudget": 0}
+                if re.search(r"-3[.\-]\d", modelo.lower()):
+                    config["thinkingConfig"] = {"thinkingLevel": "minimal"}
+                else:
+                    config["thinkingConfig"] = {"thinkingBudget": 0}
             payload = {**payload_base, "generationConfig": config}
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
             try:
