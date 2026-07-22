@@ -37,7 +37,7 @@ ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 WA_API_VERSION = "v20.0"
 GEMINI_MODELS_FALLBACK = [
     m.strip() for m in os.environ.get(
-        "GEMINI_MODELS_FALLBACK", "gemini-flash-latest,gemini-pro-latest"
+        "GEMINI_MODELS_FALLBACK", "gemini-3.6-flash,gemini-3.5-flash-lite,gemini-pro-latest"
     ).split(",") if m.strip()
 ]
 
