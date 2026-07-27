@@ -397,6 +397,335 @@ async def buscar_conocimiento_extra(pregunta: str):
 
 
 # ============================================================
+# DOCUMENTACIÓN OPERATIVA — conocimiento oficial (SOLO estado='aprobado')
+# ------------------------------------------------------------
+# Fuente nueva del bot. Reutiliza el esquema REAL del módulo Documentación
+# Operativa (mismo Supabase): procedimientos + pasos/validaciones/errores/
+# relaciones + aplicativos. La recuperación es de 2 fases y con caché para
+# escalar a cientos de procedimientos sin recargar todo en cada mensaje:
+#   Fase 1 (corpus): 1 consulta embebida trae SOLO los aprobados con su texto
+#           buscable (sin imágenes). Se cachea en memoria unos minutos.
+#   Fase 2 (relaciones): 1 consulta para los pocos candidatos seleccionados.
+# El filtro estado=eq.aprobado se aplica EN ORIGEN: lo no aprobado nunca entra.
+# ============================================================
+
+BUCKET_DOCS = "documentacion-operativa"
+_DOCS_CACHE = {"data": None, "ts": 0.0}
+_DOCS_CACHE_TTL = 300  # 5 min: un procedimiento recién aprobado aparece solo;
+#                        uno que dejó de estar aprobado desaparece en <=5 min.
+
+
+def _blob_palabras(*textos) -> set:
+    return _normalizar(" ".join(t for t in textos if t))
+
+
+async def _cargar_corpus_operativo():
+    """Fase 1: devuelve (lista de procedimientos aprobados con su texto buscable,
+    set de nombres de aplicativos normalizados). Cacheado con TTL. UNA sola
+    consulta embebida (sin N+1, sin imágenes)."""
+    ahora = time.time()
+    if _DOCS_CACHE["data"] is not None and (ahora - _DOCS_CACHE["ts"]) < _DOCS_CACHE_TTL:
+        return _DOCS_CACHE["data"]
+
+    select = (
+        "id,titulo,version,aplicativo_id,"
+        "para_que_sirve,cuando_se_utiliza,resultado_esperado,resultado_no_aplica,"
+        "observaciones,observaciones_no_aplica,"
+        "validaciones_no_aplica,relaciones_no_aplica,errores_no_aplica,"
+        "aplicativos(nombre),"
+        "pasos_procedimiento(orden,instruccion,imagen_path,imagen_no_aplica),"
+        "validaciones_procedimiento(orden,descripcion),"
+        "errores_procedimiento(orden,descripcion)"
+    )
+    try:
+        filas = await _sb_get("procedimientos", {"select": select, "estado": "eq.aprobado"})
+    except Exception as e:
+        print(f"⚠️ Documentación operativa: no se pudo cargar el corpus ({e})")
+        # No dejamos caer el bot: devolvemos lo último cacheado o vacío.
+        return _DOCS_CACHE["data"] or ([], set())
+
+    procedimientos = []
+    aplicativos_norm = set()
+    for f in filas:
+        ap = f.get("aplicativos")
+        if isinstance(ap, list):
+            ap = ap[0] if ap else None
+        aplicativo = (ap or {}).get("nombre") if ap else None
+        aplicativo = aplicativo or "—"
+        if aplicativo != "—":
+            aplicativos_norm |= _normalizar(aplicativo)
+
+        pasos = sorted(f.get("pasos_procedimiento") or [], key=lambda p: p.get("orden") or 0)
+        pasos = [
+            {
+                "orden": p.get("orden") or 0,
+                "instruccion": (p.get("instruccion") or "").strip(),
+                "tiene_captura": bool(p.get("imagen_path")) and not p.get("imagen_no_aplica"),
+                "imagen_path": p.get("imagen_path"),
+            }
+            for p in pasos
+        ]
+        validaciones = [
+            (v.get("descripcion") or "").strip()
+            for v in sorted(f.get("validaciones_procedimiento") or [], key=lambda v: v.get("orden") or 0)
+            if (v.get("descripcion") or "").strip()
+        ]
+        errores = [
+            (e.get("descripcion") or "").strip()
+            for e in sorted(f.get("errores_procedimiento") or [], key=lambda e: e.get("orden") or 0)
+            if (e.get("descripcion") or "").strip()
+        ]
+
+        titulo = (f.get("titulo") or "—").strip()
+        para = (f.get("para_que_sirve") or "").strip()
+        cuando = (f.get("cuando_se_utiliza") or "").strip()
+        resultado = (f.get("resultado_esperado") or "").strip()
+        observaciones = (f.get("observaciones") or "").strip()
+
+        proc = {
+            "id": f.get("id"),
+            "titulo": titulo,
+            "version": str(f.get("version") or "1"),
+            "aplicativo": aplicativo,
+            "para_que_sirve": para,
+            "cuando_se_utiliza": cuando,
+            "resultado_esperado": resultado,
+            "resultado_no_aplica": bool(f.get("resultado_no_aplica")),
+            "observaciones": observaciones,
+            "observaciones_no_aplica": bool(f.get("observaciones_no_aplica")),
+            "validaciones_no_aplica": bool(f.get("validaciones_no_aplica")),
+            "errores_no_aplica": bool(f.get("errores_no_aplica")),
+            "relaciones_no_aplica": bool(f.get("relaciones_no_aplica")),
+            "pasos": pasos,
+            "validaciones": validaciones,
+            "errores": errores,
+            # Índices de búsqueda (se calculan una sola vez, al cachear):
+            "_titulo_pal": _normalizar(titulo),
+            "_aplicativo_pal": _normalizar(aplicativo) if aplicativo != "—" else set(),
+            "_blob_pal": _blob_palabras(
+                titulo, aplicativo, para, cuando, resultado, observaciones,
+                " ".join(p["instruccion"] for p in pasos),
+                " ".join(validaciones), " ".join(errores),
+            ),
+        }
+        procedimientos.append(proc)
+
+    data = (procedimientos, aplicativos_norm)
+    _DOCS_CACHE["data"] = data
+    _DOCS_CACHE["ts"] = ahora
+    return data
+
+
+def _score_procedimiento(proc, tokens_now: set, tokens_ctx: set) -> float:
+    """Relevancia por coincidencia de tokens. El título y el aplicativo pesan
+    más; el contenido (pasos/validaciones/errores/propósito) también cuenta,
+    para que una pregunta encuentre el procedimiento aunque las palabras estén
+    dentro del contenido y no en el título. El contexto reciente de la
+    conversación aporta con menor peso (preguntas de seguimiento)."""
+    tw, aw, bw = proc["_titulo_pal"], proc["_aplicativo_pal"], proc["_blob_pal"]
+    s = 3.0 * len(tokens_now & tw) + 2.0 * len(tokens_now & aw) + 1.0 * len(tokens_now & bw)
+    if tokens_ctx:
+        s += 0.4 * (1.5 * len(tokens_ctx & tw) + 1.0 * len(tokens_ctx & aw) + 0.6 * len(tokens_ctx & bw))
+    return s
+
+
+async def _cargar_relaciones(ids: list):
+    """Fase 2: relaciones de los candidatos seleccionados (una sola consulta,
+    sin N+1). Excluye las descartadas."""
+    if not ids:
+        return {}
+    try:
+        filas = await _sb_get("relaciones_procedimientos", {
+            "select": "procedimiento_origen_id,condicion,procedimiento_destino_id,procedimiento_propuesto,estado",
+            "procedimiento_origen_id": f"in.({','.join(ids)})",
+            "estado": "neq.descartado",
+        })
+    except Exception as e:
+        print(f"⚠️ Documentación operativa: no se pudieron cargar relaciones ({e})")
+        return {}
+    por_origen = {}
+    for r in filas:
+        por_origen.setdefault(r["procedimiento_origen_id"], []).append(r)
+    return por_origen
+
+
+async def buscar_documentacion_operativa(pregunta: str, historial: list):
+    """Devuelve un dict con el contexto operativo para inyectar a Gemini, o None
+    si no hay ningún procedimiento aprobado relevante. Estructura:
+      {"procedimientos": [proc,...], "aplicativos_candidatos": set,
+       "ambiguo": bool, "relaciones": {origen_id: [rel,...]}}
+    """
+    procedimientos, aplicativos_norm = await _cargar_corpus_operativo()
+    if not procedimientos:
+        return None
+
+    tokens_now = _normalizar(pregunta)
+    # Contexto de seguimiento: últimas intervenciones del usuario (no del bot).
+    texto_ctx = " ".join(h["texto"] for h in historial[-6:] if h.get("rol") == "user")
+    tokens_ctx = _normalizar(texto_ctx)
+    if not tokens_now and not tokens_ctx:
+        return None
+
+    rankeados = sorted(
+        ((_score_procedimiento(p, tokens_now, tokens_ctx), p) for p in procedimientos),
+        key=lambda x: x[0], reverse=True,
+    )
+    rankeados = [(s, p) for s, p in rankeados if s > 0]
+    if not rankeados:
+        return None
+
+    mejor = rankeados[0][0]
+    # Candidatos realmente útiles: fuertes respecto al mejor, máx 3.
+    seleccion = [(s, p) for s, p in rankeados if s >= mejor * 0.5][:3]
+
+    # ¿La pregunta menciona un aplicativo concreto?
+    aplicativo_en_pregunta = bool(tokens_now & aplicativos_norm)
+
+    # Ambigüedad (sección 17/18): dos candidatos fuertes de aplicativos distintos
+    # y la pregunta no especifica aplicativo -> no adivinar, pedir aclaración.
+    ambiguo = False
+    if len(seleccion) >= 2 and not aplicativo_en_pregunta:
+        (s1, p1), (s2, p2) = seleccion[0], seleccion[1]
+        if p1["aplicativo"] != p2["aplicativo"] and p1["aplicativo"] != "—" and p2["aplicativo"] != "—" and s2 >= 0.8 * s1:
+            ambiguo = True
+
+    procs = [p for _, p in seleccion]
+    relaciones = await _cargar_relaciones([p["id"] for p in procs])
+
+    # Índice de aprobados por id para resolver destinos de relaciones (solo se
+    # considera "disponible" un procedimiento relacionado si TAMBIÉN está aprobado).
+    aprobados_por_id = {p["id"]: p for p in procedimientos}
+
+    return {
+        "procedimientos": procs,
+        "ambiguo": ambiguo,
+        "aplicativos_candidatos": {p["aplicativo"] for p in procs if p["aplicativo"] != "—"},
+        "relaciones": relaciones,
+        "aprobados_por_id": aprobados_por_id,
+    }
+
+
+def _formatear_bloque_operativo(ctx: dict) -> str:
+    """Arma el bloque de texto que se le pasa a Gemini con las 8 secciones
+    relevantes de cada procedimiento aprobado seleccionado. Respeta *_no_aplica
+    y omite secciones vacías. No incluye imágenes (solo señala si existen)."""
+    partes = []
+    for p in ctx["procedimientos"]:
+        b = [f"▸ PROCEDIMIENTO: {p['titulo']}  ·  Aplicativo: {p['aplicativo']}  ·  v{p['version']}"]
+        if p["para_que_sirve"]:
+            b.append(f"  Propósito: {p['para_que_sirve']}")
+        if p["cuando_se_utiliza"]:
+            b.append(f"  Cuándo se utiliza: {p['cuando_se_utiliza']}")
+        if p["pasos"]:
+            b.append("  Paso a paso:")
+            for paso in p["pasos"]:
+                if not paso["instruccion"]:
+                    continue
+                sufijo = "  [captura disponible]" if paso["tiene_captura"] else ""
+                b.append(f"    {paso['orden']}. {paso['instruccion']}{sufijo}")
+        if p["resultado_no_aplica"]:
+            b.append("  Resultado esperado: No aplica")
+        elif p["resultado_esperado"]:
+            b.append(f"  Resultado esperado: {p['resultado_esperado']}")
+        if p["validaciones"]:
+            b.append("  Validaciones:")
+            for v in p["validaciones"]:
+                b.append(f"    - {v}")
+        if p["errores"]:
+            b.append("  Errores frecuentes:")
+            for e in p["errores"]:
+                b.append(f"    - {e}")
+        if p["observaciones"] and not p["observaciones_no_aplica"]:
+            b.append(f"  Observaciones: {p['observaciones']}")
+
+        rels = ctx["relaciones"].get(p["id"], [])
+        if rels:
+            b.append("  Procedimientos relacionados:")
+            for r in rels:
+                cond = (r.get("condicion") or "").strip() or "En cierto caso"
+                destino_id = r.get("procedimiento_destino_id")
+                destino_aprobado = ctx["aprobados_por_id"].get(destino_id) if destino_id else None
+                if destino_aprobado:
+                    b.append(
+                        f"    - Si {cond}: continuar con \"{destino_aprobado['titulo']}\" "
+                        f"({destino_aprobado['aplicativo']}) [disponible y aprobado]"
+                    )
+                else:
+                    nombre = (r.get("procedimiento_propuesto") or "").strip() or "otro procedimiento"
+                    b.append(
+                        f"    - Si {cond}: existe un procedimiento relacionado (\"{nombre}\") "
+                        f"que AÚN NO está documentado/aprobado — solo menciona la condición, no inventes sus pasos."
+                    )
+        partes.append("\n".join(b))
+
+    encabezado = (
+        "DOCUMENTACIÓN OPERATIVA (procedimientos oficiales APROBADOS — fuente exacta y autoritativa):"
+    )
+    if ctx["ambiguo"]:
+        aps = " o ".join(sorted(ctx["aplicativos_candidatos"]))
+        encabezado += (
+            f"\n[AMBIGÜEDAD: hay procedimientos aprobados equivalentes para aplicativos distintos ({aps}) "
+            f"y la asesora no especificó cuál. NO respondas ambos ni adivines: pregúntale brevemente "
+            f"en qué aplicativo lo necesita antes de dar el procedimiento.]"
+        )
+    return encabezado + "\n\n" + "\n\n".join(partes)
+
+
+async def firmar_captura(path: str):
+    """URL firmada temporal (10 min) para una captura del bucket privado, sin
+    hacerlo público ni tocar RLS/Storage. Best-effort: None si falla."""
+    if not path:
+        return None
+    endpoint = f"{SUPABASE_URL}/storage/v1/object/sign/{BUCKET_DOCS}/{path}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(endpoint, headers=SUPABASE_HEADERS, json={"expiresIn": 600}, timeout=10.0)
+            if res.status_code != 200:
+                print(f"⚠️ No se pudo firmar captura [{res.status_code}]")
+                return None
+            signed = res.json().get("signedURL") or res.json().get("signedUrl")
+            if not signed:
+                return None
+            if signed.startswith("http"):
+                return signed
+            return f"{SUPABASE_URL}/storage/v1{signed if signed.startswith('/') else '/' + signed}"
+    except Exception as e:
+        print(f"⚠️ Excepción firmando captura: {e}")
+        return None
+
+
+_RE_MOSTRAR_CAPTURA = re.compile(
+    r"(muestr|ensen|ense.a|captur|pantallaz|screenshot|imagen|foto|"
+    r"donde\s+(presion|hago\s+clic|dar\s+clic|clic|pulsar|queda|esta))"
+)
+
+
+async def _enviar_captura_si_corresponde(numero: str, mensaje_usuario: str, ctx: dict):
+    """Si la asesora pide ver dónde presionar/una captura y hay UN procedimiento
+    claro con captura, envía la imagen del paso más relevante con URL firmada.
+    Best-effort: nunca interrumpe el flujo de texto."""
+    try:
+        if not ctx or ctx.get("ambiguo") or len(ctx["procedimientos"]) != 1:
+            return
+        if not _RE_MOSTRAR_CAPTURA.search(_texto_normalizado_plano(mensaje_usuario)):
+            return
+        proc = ctx["procedimientos"][0]
+        pasos_con_captura = [p for p in proc["pasos"] if p["tiene_captura"] and p.get("imagen_path")]
+        if not pasos_con_captura:
+            return
+        tokens = _normalizar(mensaje_usuario)
+        mejor = max(
+            pasos_con_captura,
+            key=lambda p: len(tokens & _normalizar(p["instruccion"])),
+        )
+        url = await firmar_captura(mejor["imagen_path"])
+        if url:
+            await enviar_imagen_whatsapp(numero, url, f"Paso {mejor['orden']}: {mejor['instruccion']}"[:1000])
+    except Exception as e:
+        print(f"⚠️ No se pudo enviar la captura del procedimiento: {e}")
+
+
+# ============================================================
 # CEREBRO DE DU — 1 sola llamada a Gemini con prioridad de fuentes + memoria
 # ============================================================
 
@@ -405,6 +734,7 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
     archivos_parts = await obtener_manuales(mensaje_usuario)
     conocimiento_extra = await buscar_conocimiento_extra(mensaje_usuario)
     tarifas_encontradas = await buscar_tarifas(mensaje_usuario)
+    ctx_operativo = await buscar_documentacion_operativa(mensaje_usuario, historial)
 
     system_instruction = (
         "Tu nombre es Du. Eres el compañero de trabajo virtual de las asesoras de COFREM en People BPO, "
@@ -419,6 +749,23 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         "mi área 😅 Yo solo manejo temas de Cofrem. ¿Te ayudo con algo de un trámite o proceso?\" (podés variar el tono "
         "pero NUNCA contestar el dato en sí).\n\n"
         "ORDEN DE PRIORIDAD DE FUENTES para preguntas que SÍ son de Cofrem (decide tú misma cuál usar, sin avisar el proceso):\n"
+        "0. DOCUMENTACIÓN OPERATIVA (máxima prioridad para preguntas de \"cómo hago / cómo valido / cómo consulto / dónde "
+        "reviso / cuál es el proceso / qué hago si aparece X\" y en general procedimientos en aplicativos como Seven o Kupi). "
+        "Si te paso un bloque \"DOCUMENTACIÓN OPERATIVA\", son procedimientos oficiales YA APROBADOS: es la fuente exacta y "
+        "autoritativa; úsala por encima de PDFs y web. REGLAS AL RESPONDER DESDE ESTE BLOQUE (críticas):\n"
+        "   • Adapta la respuesta a lo que preguntan: si piden el paso a paso, prioriza los pasos; si preguntan para qué "
+        "sirve, prioriza el Propósito; cuándo usarlo -> \"Cuándo se utiliza\"; qué debería pasar -> Resultado; qué validar "
+        "-> Validaciones; \"me aparece/qué hago si X\" -> Errores frecuentes + Validaciones + Procedimientos relacionados. "
+        "No vuelques siempre las 8 secciones; solo si piden \"todo el procedimiento\".\n"
+        "   • NO inventes NADA que no esté en el bloque: ni botones, ni rutas, ni opciones de Seven/Kupi, ni requisitos, ni "
+        "pasos, ni políticas. Si el dato puntual no está en la documentación, dilo con naturalidad (\"No encuentro ese dato "
+        "dentro de la documentación operativa aprobada disponible\") y recién ahí puedes usar otras fuentes, aclarando que "
+        "no forma parte del procedimiento aprobado.\n"
+        "   • Si el bloque trae la marca [AMBIGÜEDAD ...], NO adivines ni respondas ambos: pregunta brevemente en qué "
+        "aplicativo lo necesita.\n"
+        "   • Procedimientos relacionados: si el bloque indica uno relacionado y aprobado, puedes ofrecerlo/explicarlo; si "
+        "dice que aún no está documentado/aprobado, solo menciona la condición, sin inventar sus pasos.\n"
+        "   • Si un paso dice [captura disponible] y la asesora pide ver la pantalla, avísale que le compartes la imagen.\n"
         "1. Si la pregunta es sobre tarifas o precios de un servicio, y te paso un bloque \"TARIFAS ENCONTRADAS\" junto con "
         "el mensaje, esa es la fuente autoritativa y exacta — respondé con eso, no busques en otro lado. Si el bloque viene "
         "vacío o no trae el servicio/categoría exacta que preguntan, decilo honestamente en vez de inventar un precio.\n"
@@ -466,9 +813,14 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
     else:
         texto_avisos = ""
 
+    if ctx_operativo:
+        texto_operativo = "\n\n" + _formatear_bloque_operativo(ctx_operativo)
+    else:
+        texto_operativo = ""
+
     contenido_historial = [{"role": h["rol"], "parts": [{"text": h["texto"]}]} for h in historial]
     contents = contenido_historial + [
-        {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_tarifas + texto_avisos}]}
+        {"role": "user", "parts": archivos_parts + [{"text": mensaje_usuario + texto_operativo + texto_tarifas + texto_avisos}]}
     ]
 
     texto_respuesta, modelo_usado = await _llamar_gemini(
@@ -483,6 +835,9 @@ async def consultar_du_bot(mensaje_usuario: str, nombre_asesora: str, numero: st
         return f"Hola {nombre_asesora}. Tuve un contratiempo de conexión. Dame un minutito e intenta de nuevo. 🛠️✨"
 
     await guardar_historial(numero, mensaje_usuario, texto_respuesta)
+    # Si la asesora pidió ver una captura y hay un procedimiento claro con imagen,
+    # se envía como imagen aparte (URL firmada temporal). Best-effort.
+    await _enviar_captura_si_corresponde(numero, mensaje_usuario, ctx_operativo)
     return texto_respuesta
 
 
