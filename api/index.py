@@ -1534,8 +1534,8 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
         res = await client.post(url, json=payload, headers=headers, timeout=15.0)
         if res.status_code != 200:
             print(f"❌ Error enviando plantilla PQRSF a {numero}: [{res.status_code}] {res.text}")
-            return False
-    return True
+            return False, f"[{res.status_code}] {res.text[:300]}"
+    return True, None
 
 
 @app.post("/api/pqrsf-alerta")
@@ -1560,10 +1560,11 @@ async def api_pqrsf_alerta(request: Request):
         if len(numero) < 8:
             fallidos.append({"numero": numero, "motivo": "numero_invalido"})
             continue
-        if await enviar_plantilla_pqrsf(numero, nombre, valor):
+        ok, detalle = await enviar_plantilla_pqrsf(numero, nombre, valor)
+        if ok:
             enviados.append(numero)
         else:
-            fallidos.append({"numero": numero, "motivo": "envio_fallido"})
+            fallidos.append({"numero": numero, "motivo": "envio_fallido", "detalle": detalle})
 
     print(f"📣 Alerta PQRSF (valor={valor}) enviados={enviados} fallidos={fallidos}")
     return Response(
