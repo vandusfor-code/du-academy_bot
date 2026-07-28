@@ -34,8 +34,9 @@ PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 PQRSF_SECRET = os.environ.get("PQRSF_SECRET", "")
-PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "aviso_pqrsf")
-PQRSF_TEMPLATE_LANG = os.environ.get("PQRSF_TEMPLATE_LANG", "es")
+PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "aviso_pqrsfff")
+PQRSF_TEMPLATE_LANG = os.environ.get("PQRSF_TEMPLATE_LANG", "es_CO")
+PQRSF_IMAGEN_URL = os.environ.get("PQRSF_IMAGEN_URL", "")  # imagen pública del encabezado
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODELS_FALLBACK = [
@@ -1503,15 +1504,29 @@ def _formatear_fecha_co(iso_str: str) -> str:
 
 
 # ============================================================
-# ALERTA PQRSF — aviso automático cuando "PQRSF por comunicar" baja al umbral
+# ALERTA PQRSF — aviso automático cuando "PQRSF por comunicar" llega a 0
 # El disparador en tiempo (casi) real vive en Apps Script (hoja PQRSF): lee el
-# valor, aplica umbral + anti-repetición, busca los números en la pestaña
-# Asesores y llama a este endpoint. El bot solo envía la plantilla aprobada.
+# valor, dispara al llegar a 0 (+ anti-repetición), busca los números en la
+# pestaña Asesores y llama a este endpoint. El bot solo envía la plantilla
+# aprobada (encabezado de imagen + cuerpo con {{1}} = nombre).
 # ============================================================
 
-async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
+async def enviar_plantilla_pqrsf(numero: str, nombre: str):
+    """Envía la plantilla aprobada aviso_pqrsfff. Encabezado de imagen (si hay
+    PQRSF_IMAGEN_URL) + cuerpo con una sola variable {{1}} = nombre.
+    Devuelve (ok, detalle_error)."""
     url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    componentes = []
+    if PQRSF_IMAGEN_URL:
+        componentes.append({
+            "type": "header",
+            "parameters": [{"type": "image", "image": {"link": PQRSF_IMAGEN_URL}}],
+        })
+    componentes.append({
+        "type": "body",
+        "parameters": [{"type": "text", "text": str(nombre)}],
+    })
     payload = {
         "messaging_product": "whatsapp",
         "to": numero,
@@ -1519,15 +1534,7 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
         "template": {
             "name": PQRSF_TEMPLATE_NAME,
             "language": {"code": PQRSF_TEMPLATE_LANG},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": str(nombre)},
-                        {"type": "text", "text": str(valor)},
-                    ],
-                }
-            ],
+            "components": componentes,
         },
     }
     async with httpx.AsyncClient() as client:
@@ -1536,49 +1543,6 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
             print(f"❌ Error enviando plantilla PQRSF a {numero}: [{res.status_code}] {res.text}")
             return False, f"[{res.status_code}] {res.text[:300]}"
     return True, None
-
-
-@app.get("/api/pqrsf-diag")
-async def api_pqrsf_diag(request: Request):
-    # Diagnóstico temporal (solo lectura): qué WABAs ve el token y qué plantillas
-    # "pqrsf" existen, con su idioma/estado real. Protegido con PQRSF_SECRET.
-    if not PQRSF_SECRET or request.headers.get("authorization") != f"Bearer {PQRSF_SECRET}":
-        return Response(content="Forbidden", status_code=403)
-
-    out = {"waba_ids": [], "aviso_pqrsf": []}
-    async with httpx.AsyncClient() as c:
-        dbg = await c.get(
-            "https://graph.facebook.com/v20.0/debug_token",
-            params={"input_token": AC_ACCESS_TOKEN, "access_token": AC_ACCESS_TOKEN}, timeout=15.0,
-        )
-        out["debug_token_status"] = dbg.status_code
-        waba_ids = set()
-        try:
-            for s in dbg.json().get("data", {}).get("granular_scopes", []):
-                if "whatsapp" in s.get("scope", ""):
-                    for t in s.get("target_ids", []) or []:
-                        waba_ids.add(str(t))
-        except Exception as e:
-            out["parse_error"] = str(e)
-        out["waba_ids"] = list(waba_ids)
-
-        for w in waba_ids:
-            r = await c.get(
-                f"https://graph.facebook.com/v20.0/{w}/message_templates",
-                params={"access_token": AC_ACCESS_TOKEN, "fields": "name,language,status,category", "limit": "300"},
-                timeout=15.0,
-            )
-            if r.status_code == 200:
-                for t in r.json().get("data", []):
-                    if "pqrsf" in str(t.get("name", "")).lower():
-                        out["aviso_pqrsf"].append({
-                            "waba": w, "name": t.get("name"), "language": t.get("language"),
-                            "status": t.get("status"), "category": t.get("category"),
-                        })
-            else:
-                out["aviso_pqrsf"].append({"waba": w, "error": f"[{r.status_code}] {r.text[:150]}"})
-
-    return Response(content=json.dumps(out), media_type="application/json")
 
 
 @app.post("/api/pqrsf-alerta")
@@ -1603,7 +1567,7 @@ async def api_pqrsf_alerta(request: Request):
         if len(numero) < 8:
             fallidos.append({"numero": numero, "motivo": "numero_invalido"})
             continue
-        ok, detalle = await enviar_plantilla_pqrsf(numero, nombre, valor)
+        ok, detalle = await enviar_plantilla_pqrsf(numero, nombre)
         if ok:
             enviados.append(numero)
         else:
