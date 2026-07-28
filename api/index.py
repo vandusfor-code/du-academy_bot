@@ -1538,6 +1538,49 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
     return True, None
 
 
+@app.get("/api/pqrsf-diag")
+async def api_pqrsf_diag(request: Request):
+    # Diagnóstico temporal (solo lectura): qué WABAs ve el token y qué plantillas
+    # "pqrsf" existen, con su idioma/estado real. Protegido con PQRSF_SECRET.
+    if not PQRSF_SECRET or request.headers.get("authorization") != f"Bearer {PQRSF_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+
+    out = {"waba_ids": [], "aviso_pqrsf": []}
+    async with httpx.AsyncClient() as c:
+        dbg = await c.get(
+            "https://graph.facebook.com/v20.0/debug_token",
+            params={"input_token": AC_ACCESS_TOKEN, "access_token": AC_ACCESS_TOKEN}, timeout=15.0,
+        )
+        out["debug_token_status"] = dbg.status_code
+        waba_ids = set()
+        try:
+            for s in dbg.json().get("data", {}).get("granular_scopes", []):
+                if "whatsapp" in s.get("scope", ""):
+                    for t in s.get("target_ids", []) or []:
+                        waba_ids.add(str(t))
+        except Exception as e:
+            out["parse_error"] = str(e)
+        out["waba_ids"] = list(waba_ids)
+
+        for w in waba_ids:
+            r = await c.get(
+                f"https://graph.facebook.com/v20.0/{w}/message_templates",
+                params={"access_token": AC_ACCESS_TOKEN, "fields": "name,language,status,category", "limit": "300"},
+                timeout=15.0,
+            )
+            if r.status_code == 200:
+                for t in r.json().get("data", []):
+                    if "pqrsf" in str(t.get("name", "")).lower():
+                        out["aviso_pqrsf"].append({
+                            "waba": w, "name": t.get("name"), "language": t.get("language"),
+                            "status": t.get("status"), "category": t.get("category"),
+                        })
+            else:
+                out["aviso_pqrsf"].append({"waba": w, "error": f"[{r.status_code}] {r.text[:150]}"})
+
+    return Response(content=json.dumps(out), media_type="application/json")
+
+
 @app.post("/api/pqrsf-alerta")
 async def api_pqrsf_alerta(request: Request):
     if not PQRSF_SECRET or request.headers.get("authorization") != f"Bearer {PQRSF_SECRET}":
