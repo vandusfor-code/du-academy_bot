@@ -34,12 +34,12 @@ PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 PQRSF_SECRET = os.environ.get("PQRSF_SECRET", "")
-PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "aviso_pqrsfff")
+PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "avisopqrsf1")
 PQRSF_TEMPLATE_LANG = os.environ.get("PQRSF_TEMPLATE_LANG", "es_CO")
 PQRSF_IMAGEN_URL = os.environ.get("PQRSF_IMAGEN_URL", "")  # URL pública del encabezado (sirve el bot)
 PQRSF_IMAGEN_ORIGEN = os.environ.get(  # de dónde toma el bot la imagen para re-servirla
     "PQRSF_IMAGEN_ORIGEN",
-    "https://drive.google.com/uc?export=download&id=12uHQPfueNYkZCI9dmSORmdYKF_3q7W2F",
+    "https://drive.google.com/uc?export=download&id=1y6zgK8AdmwGa1R5s7TWYwR4ZiXECgWMw",
 )
 
 WA_API_VERSION = "v20.0"
