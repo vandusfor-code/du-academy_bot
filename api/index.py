@@ -41,6 +41,7 @@ PQRSF_IMAGEN_ORIGEN = os.environ.get(  # de dónde toma el bot la imagen para re
     "PQRSF_IMAGEN_ORIGEN",
     "https://drive.google.com/uc?export=download&id=1y6zgK8AdmwGa1R5s7TWYwR4ZiXECgWMw",
 )
+PQRSF_MINUTOS = os.environ.get("PQRSF_MINUTOS", "30")  # variable {{2}} de la plantilla (fijo)
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODELS_FALLBACK = [
@@ -1516,8 +1517,8 @@ def _formatear_fecha_co(iso_str: str) -> str:
 # ============================================================
 
 async def enviar_plantilla_pqrsf(numero: str, nombre: str):
-    """Envía la plantilla aprobada aviso_pqrsfff. Encabezado de imagen (si hay
-    PQRSF_IMAGEN_URL) + cuerpo con una sola variable {{1}} = nombre.
+    """Envía la plantilla aprobada avisopqrsf1. Encabezado de imagen (si hay
+    PQRSF_IMAGEN_URL) + cuerpo con {{1}} = nombre y {{2}} = minutos (30).
     Devuelve (ok, detalle_error)."""
     url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
@@ -1529,7 +1530,10 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str):
         })
     componentes.append({
         "type": "body",
-        "parameters": [{"type": "text", "text": str(nombre)}],
+        "parameters": [
+            {"type": "text", "text": str(nombre)},          # {{1}} = nombre
+            {"type": "text", "text": str(PQRSF_MINUTOS)},   # {{2}} = minutos (30)
+        ],
     })
     payload = {
         "messaging_product": "whatsapp",
