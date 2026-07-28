@@ -33,6 +33,9 @@ PDF_SERVICE_URL = os.environ.get("PDF_SERVICE_URL", "")
 PDF_SERVICE_SECRET = os.environ.get("PDF_SERVICE_SECRET", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
+PQRSF_SECRET = os.environ.get("PQRSF_SECRET", "")
+PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "aviso_pqrsf")
+PQRSF_TEMPLATE_LANG = os.environ.get("PQRSF_TEMPLATE_LANG", "es")
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODELS_FALLBACK = [
@@ -1497,6 +1500,76 @@ async def procesar_compromiso_consolidado(numero: str, texto: str) -> bool:
 def _formatear_fecha_co(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str)
     return dt.strftime("%d/%m/%Y")
+
+
+# ============================================================
+# ALERTA PQRSF — aviso automático cuando "PQRSF por comunicar" baja al umbral
+# El disparador en tiempo (casi) real vive en Apps Script (hoja PQRSF): lee el
+# valor, aplica umbral + anti-repetición, busca los números en la pestaña
+# Asesores y llama a este endpoint. El bot solo envía la plantilla aprobada.
+# ============================================================
+
+async def enviar_plantilla_pqrsf(numero: str, nombre: str, valor) -> bool:
+    url = f"https://graph.facebook.com/{WA_API_VERSION}/{AC_PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {AC_ACCESS_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "template",
+        "template": {
+            "name": PQRSF_TEMPLATE_NAME,
+            "language": {"code": PQRSF_TEMPLATE_LANG},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": str(nombre)},
+                        {"type": "text", "text": str(valor)},
+                    ],
+                }
+            ],
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers, timeout=15.0)
+        if res.status_code != 200:
+            print(f"❌ Error enviando plantilla PQRSF a {numero}: [{res.status_code}] {res.text}")
+            return False
+    return True
+
+
+@app.post("/api/pqrsf-alerta")
+async def api_pqrsf_alerta(request: Request):
+    if not PQRSF_SECRET or request.headers.get("authorization") != f"Bearer {PQRSF_SECRET}":
+        return Response(content="Forbidden", status_code=403)
+
+    body = await request.json()
+    valor = body.get("valor")
+    destinatarios = body.get("destinatarios", [])
+    if valor is None or not isinstance(destinatarios, list) or not destinatarios:
+        return Response(
+            content=json.dumps({"error": "valor y destinatarios requeridos"}),
+            status_code=400, media_type="application/json",
+        )
+
+    enviados, fallidos = [], []
+    # Tope defensivo: nunca más de 10 destinatarios por llamada.
+    for d in destinatarios[:10]:
+        nombre = str((d or {}).get("nombre", "")).strip() or "compañer@"
+        numero = re.sub(r"\D", "", str((d or {}).get("numero", "")))
+        if len(numero) < 8:
+            fallidos.append({"numero": numero, "motivo": "numero_invalido"})
+            continue
+        if await enviar_plantilla_pqrsf(numero, nombre, valor):
+            enviados.append(numero)
+        else:
+            fallidos.append({"numero": numero, "motivo": "envio_fallido"})
+
+    print(f"📣 Alerta PQRSF (valor={valor}) enviados={enviados} fallidos={fallidos}")
+    return Response(
+        content=json.dumps({"ok": len(enviados) > 0, "enviados": enviados, "fallidos": fallidos}),
+        media_type="application/json",
+    )
 
 
 # ============================================================
