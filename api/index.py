@@ -36,7 +36,11 @@ ADMIN_NUMERO = os.environ.get("ADMIN_NUMERO", "")
 PQRSF_SECRET = os.environ.get("PQRSF_SECRET", "")
 PQRSF_TEMPLATE_NAME = os.environ.get("PQRSF_TEMPLATE_NAME", "aviso_pqrsfff")
 PQRSF_TEMPLATE_LANG = os.environ.get("PQRSF_TEMPLATE_LANG", "es_CO")
-PQRSF_IMAGEN_URL = os.environ.get("PQRSF_IMAGEN_URL", "")  # imagen pública del encabezado
+PQRSF_IMAGEN_URL = os.environ.get("PQRSF_IMAGEN_URL", "")  # URL pública del encabezado (sirve el bot)
+PQRSF_IMAGEN_ORIGEN = os.environ.get(  # de dónde toma el bot la imagen para re-servirla
+    "PQRSF_IMAGEN_ORIGEN",
+    "https://drive.google.com/uc?export=download&id=12uHQPfueNYkZCI9dmSORmdYKF_3q7W2F",
+)
 
 WA_API_VERSION = "v20.0"
 GEMINI_MODELS_FALLBACK = [
@@ -1543,6 +1547,35 @@ async def enviar_plantilla_pqrsf(numero: str, nombre: str):
             print(f"❌ Error enviando plantilla PQRSF a {numero}: [{res.status_code}] {res.text}")
             return False, f"[{res.status_code}] {res.text[:300]}"
     return True, None
+
+
+_PQRSF_IMG_CACHE = {"bytes": None, "ct": "image/png"}
+
+
+@app.get("/api/pqrsf-imagen")
+async def api_pqrsf_imagen():
+    """Sirve la imagen del encabezado de la plantilla desde un dominio estable
+    (vercel.app), re-tomándola de PQRSF_IMAGEN_ORIGEN. Así WhatsApp la descarga
+    de forma confiable en vez de depender del fetch a Google Drive. Cacheada."""
+    if _PQRSF_IMG_CACHE["bytes"] is None and PQRSF_IMAGEN_ORIGEN:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                r = await client.get(PQRSF_IMAGEN_ORIGEN, timeout=20.0, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and r.content:
+                _PQRSF_IMG_CACHE["bytes"] = r.content
+                ct = r.headers.get("Content-Type", "image/png")
+                if "image" in ct:
+                    _PQRSF_IMG_CACHE["ct"] = ct.split(";")[0].strip()
+        except Exception as e:
+            print(f"⚠️ No se pudo obtener la imagen PQRSF de origen: {e}")
+
+    if not _PQRSF_IMG_CACHE["bytes"]:
+        return Response(content="imagen no disponible", status_code=502)
+    return Response(
+        content=_PQRSF_IMG_CACHE["bytes"],
+        media_type=_PQRSF_IMG_CACHE["ct"],
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.post("/api/pqrsf-alerta")
