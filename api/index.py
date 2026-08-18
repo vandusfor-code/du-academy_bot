@@ -546,7 +546,7 @@ async def _cargar_relaciones(ids: list):
     try:
         filas = await _sb_get("relaciones_procedimientos", {
             "select": "procedimiento_origen_id,condicion,procedimiento_destino_id,procedimiento_propuesto,estado",
-            "procedimiento_origen_id": f"in.({','.join(ids)})",
+            "procedimiento_origen_id": f"in.({','.join(str(i) for i in ids)})",
             "estado": "neq.descartado",
         })
     except Exception as e:
