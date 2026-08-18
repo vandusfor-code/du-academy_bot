@@ -1486,6 +1486,11 @@ async def procesar_compromiso_consolidado(numero: str, texto: str) -> bool:
 
     if not pdf_final_url:
         print(f"❌ No se pudo generar el PDF final para {id_corte}")
+        await despachar_mensaje_whatsapp(
+            numero,
+            "Tuve un problema generando tu compromiso firmado en PDF. Ya quedó registrado igual, "
+            "y en un momento te lo hago llegar. Disculpa la demora 🙏"
+        )
         return True
 
     await _sb_patch("auditorias_consolidadas", {"id_corte": f"eq.{id_corte}"}, {
